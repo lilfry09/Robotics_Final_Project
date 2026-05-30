@@ -1,0 +1,1002 @@
+# DepthVLA-OFT Environment Progress
+
+## 2026-05-28
+
+- Started environment setup for DepthVLA-OFT training.
+- Checked current Python environment:
+  - Active Python: `/root/miniconda3/bin/python`
+  - Version: Python 3.12.3
+  - Existing conda envs: only `base`
+- Decision: do not install OpenVLA-OFT/LIBERO into `base`; create a separate Python 3.10 conda environment because the project docs and pinned dependencies target Python 3.10-era packages.
+- Created conda environment:
+  - Name: `depthvla`
+  - Path: `/root/miniconda3/envs/depthvla`
+  - Python: 3.10.20
+- Next step: install OpenVLA-OFT package dependencies into `depthvla` with `pip install -e .`.
+- Attempted `conda run -n depthvla pip install -e .`.
+  - Result: interrupted manually after the process stayed silent for more than 15 minutes.
+  - Follow-up decision: switch to more observable, staged installation instead of one opaque editable install.
+- Installed the repository itself in editable mode without dependencies:
+  - Command: `conda run -n depthvla python -m pip install -e . --no-deps -v`
+  - Result: success (`openvla-oft-0.0.1` installed).
+- Hardware check:
+  - GPU: NVIDIA RTX PRO 6000 Blackwell Server Edition
+  - Driver: 595.58.03
+  - VRAM: 97887 MiB
+- Next step: install runtime dependencies in batches. Need to be careful with PyTorch version because official OpenVLA-OFT pins `torch==2.2.0`, while Blackwell GPUs generally require newer CUDA/PyTorch support.
+- Checked CUDA/GPU compatibility:
+  - `nvidia-smi` reports CUDA Version 13.2.
+  - Because this machine uses Blackwell (`sm_120` class hardware), the original `torch==2.2.0` pin is likely too old for GPU training here.
+  - Decision: install a newer official PyTorch CUDA wheel first, then install the rest of OpenVLA-OFT dependencies around it.
+- Installed PyTorch stack from the official CUDA 13.0 wheel index:
+  - Command: `conda run -n depthvla python -m pip install --index-url https://download.pytorch.org/whl/cu130 torch torchvision torchaudio`
+  - Installed:
+    - `torch-2.12.0+cu130`
+    - `torchvision-0.27.0+cu130`
+    - `torchaudio-2.11.0+cu130`
+  - Note: this intentionally conflicts with the original repo pins (`torch==2.2.0`, `torchvision==0.17.0`, `torchaudio==2.2.0`) because the machine uses a Blackwell GPU.
+  - Remaining dependencies still need installation: `transformers`, `huggingface_hub`, `peft`, `timm`, `tensorflow`, `dlimp`, LIBERO/robosuite, etc.
+- Verified PyTorch CUDA:
+  - `torch.__version__`: `2.12.0+cu130`
+  - `torch.version.cuda`: `13.0`
+  - `torch.cuda.is_available()`: `True`
+  - GPU matmul smoke test: passed on `NVIDIA RTX PRO 6000 Blackwell Server Edition`.
+- User installed remaining packages including `transformers`, `peft`, and `dlimp`.
+- Verified package imports:
+  - `transformers`: OK, version `4.40.1`
+  - `peft`: OK, version `0.11.1`
+  - `tensorflow` / `dlimp`: failing because NumPy is `2.2.6`; TensorFlow 2.15 requires NumPy `<2`
+  - `h5py`: OK
+  - `LIBERO`: cloned at `/root/autodl-tmp/LIBERO`, but Python import still fails, so it is not installed editable yet
+  - `robosuite`: installed, but import currently hits EGL/OpenGL initialization issue
+- Next fixes:
+  - Pin NumPy back to `1.26.4`.
+  - Install LIBERO editable into `depthvla`.
+  - Then re-check TensorFlow, dlimp, LIBERO, and robosuite imports.
+- User finished installing additional Python dependencies manually.
+- Fixed TensorFlow / dlimp NumPy incompatibility:
+  - NumPy was previously `2.2.6`, which breaks TensorFlow 2.15-era imports.
+  - Pinned NumPy to `1.26.4`.
+  - After the pin, `tensorflow`, `dlimp`, `transformers`, `peft`, and `torch` imports were reported OK.
+  - Note: `opencv-python` may warn that it prefers NumPy `>=2`, but for this project TensorFlow / RLDS compatibility is higher priority, so keep NumPy `1.26.4`.
+- LIBERO status:
+  - Repository exists at `/root/autodl-tmp/LIBERO`.
+  - Added source path file so Python can find the package:
+    - `/root/miniconda3/envs/depthvla/lib/python3.10/site-packages/libero_source_path.pth`
+    - Content: `/root/autodl-tmp/LIBERO/libero`
+  - Remaining issue: first `import libero` prompts interactively because `/root/.libero/config.yaml` is missing.
+  - Next step: create `/root/.libero/config.yaml` manually with default paths to avoid the interactive prompt.
+- Verified DepthVLA code inside the `depthvla` environment:
+  - `tests/test_depth_encoder.py`: passed.
+  - `py_compile` for `regenerate_libero_rgbd_dataset.py`, `finetune_depthvla.py`, `depth_encoder.py`, and `modeling_prismatic.py`: passed.
+- Robosuite status:
+  - `robosuite` is installed.
+  - Headless import/rendering may require:
+    - `MUJOCO_GL=egl`
+    - `PYOPENGL_PLATFORM=egl`
+  - Retest after LIBERO config is created.
+- Created LIBERO non-interactive config:
+  - File: `/root/.libero/config.yaml`
+  - Uses default benchmark, BDDL, init-state, dataset, and asset paths under `/root/autodl-tmp/LIBERO/libero/libero`.
+- Fixed LIBERO Python path:
+  - Changed `/root/miniconda3/envs/depthvla/lib/python3.10/site-packages/libero_source_path.pth` to point at `/root/autodl-tmp/LIBERO`.
+  - Reason: LIBERO source imports use the double package path `libero.libero.*`; pointing at the inner `LIBERO/libero` directory breaks those imports.
+- Verified LIBERO import:
+  - `import libero.libero`: OK
+  - `from libero.libero import benchmark`: OK
+  - Warning remains: `/root/autodl-tmp/LIBERO/libero/datasets` does not exist yet, so raw/demo datasets still need to be downloaded or generated.
+- Robosuite / MuJoCo EGL issue:
+  - `MUJOCO_GL=egl PYOPENGL_PLATFORM=egl` still failed because PyOpenGL could not find a valid EGL entry point (`eglQueryString` was `None`).
+  - Installed missing Ubuntu GL runtime/development packages:
+    - `libegl1`
+    - `libegl-dev`
+    - `libosmesa6`
+    - `libosmesa6-dev`
+    - plus related GLVND / X11 dependencies pulled by apt.
+  - Next step: retest robosuite import with EGL and OSMesa after these packages are available.
+- Retested robosuite after GL package install:
+  - `MUJOCO_GL=egl PYOPENGL_PLATFORM=egl`: `robosuite` import OK.
+  - `MUJOCO_GL=osmesa PYOPENGL_PLATFORM=osmesa`: `robosuite` import OK.
+  - EGL is the preferred setting for this GPU machine; OSMesa is available as a CPU/software fallback.
+- Ran robosuite private macro setup:
+  - Command: `python /root/miniconda3/envs/depthvla/lib/python3.10/site-packages/robosuite/scripts/setup_macros.py`
+  - Created: `/root/miniconda3/envs/depthvla/lib/python3.10/site-packages/robosuite/macros_private.py`
+  - Follow-up import is clean: `robosuite clean import 1.4.1`.
+- Verified CLI entry points:
+  - `experiments/robot/libero/regenerate_libero_rgbd_dataset.py --help`: OK.
+  - `experiments/robot/libero/run_libero_eval.py --help`: OK.
+  - `vla-scripts/finetune_depthvla.py --help`: OK.
+  - TensorFlow prints GPU-library warnings during these imports, but this is not blocking because PyTorch is the training backend and CUDA is already verified there.
+- Current blocker before actual DepthVLA training:
+  - LIBERO demo/dataset files are not present yet (`/root/autodl-tmp/LIBERO/libero/datasets` does not exist).
+  - Need to download or provide LIBERO raw demonstrations, then run RGB-D regeneration before launching the matched RGB-only / RGB-D training jobs.
+- Began dataset preparation.
+- Checked the installed LIBERO repository:
+  - Official download script supports `libero_spatial`, `libero_object`, `libero_goal`, and `libero_100`.
+  - Registered benchmark suites in this local LIBERO clone are `libero_spatial`, `libero_object`, `libero_goal`, `libero_10`, `libero_90`, and `libero_100`.
+  - This clone does not register `libero_plus` or `libero_pro`; those names are currently only present in our modified DepthVLA eval/regeneration plumbing.
+- Decision:
+  - Use `libero_spatial` first to validate the full RGB-D pipeline.
+  - Later, if a LIBERO-Plus/Pro-compatible benchmark package and raw demos are provided, run the same regeneration/training path on those suites.
+- Checked Hugging Face dataset repo `yifengzhu-hf/LIBERO-datasets`:
+  - Contains 132 files.
+  - Contains `libero_10`, `libero_90`, `libero_goal`, `libero_object`, and `libero_spatial`.
+  - Does not contain `libero_plus` or `libero_pro`.
+- Disk check before download:
+  - `/root/autodl-tmp`: about 50G available.
+  - OK for downloading `libero_spatial` first.
+- Next action:
+  - Download `libero_spatial` raw demonstrations from Hugging Face into `/root/autodl-tmp/LIBERO/libero/datasets`.
+- First Hugging Face download attempt:
+  - Command used LIBERO's `download_libero_datasets.py --datasets libero_spatial --use-huggingface`.
+  - The process stayed alive for more than two minutes but all `.incomplete` files remained 0 bytes.
+  - Likely cause: Hugging Face Xet transfer backend hanging in this environment.
+  - Stopped the stuck download process.
+  - Next retry: disable Xet with `HF_HUB_DISABLE_XET=1` and use the same dataset target directory.
+- Second download attempt with `HF_HUB_DISABLE_XET=1`:
+  - Failed immediately because the first attempt left an empty `libero_spatial` directory and the LIBERO downloader tried to prompt for overwrite.
+  - Verified there were no valid `.hdf5` files, only empty/incomplete cache artifacts.
+  - Removed the empty `libero_spatial` directory and stale Hugging Face partial-download cache for this dataset.
+  - Next retry: run the same command again with `HF_HUB_DISABLE_XET=1`.
+- Third download attempt with `HF_HUB_DISABLE_XET=1`:
+  - Download target: raw LIBERO Spatial demonstrations.
+  - Purpose: these raw `.hdf5` demo files are the input to `regenerate_libero_rgbd_dataset.py`, which replays actions and saves RGB-D + camera geometry.
+  - The download made real progress but failed near the end due to Hugging Face HTTPS/SSL connection reset (`IncompleteRead` / `UNEXPECTED_EOF_WHILE_READING`).
+  - Successfully materialized 2 of 10 `libero_spatial` HDF5 files:
+    - `pick_up_the_black_bowl_on_the_stove_and_place_it_on_the_plate_demo.hdf5`
+    - `pick_up_the_black_bowl_on_the_wooden_cabinet_and_place_it_on_the_plate_demo.hdf5`
+  - Several partial `.incomplete` files remain in the Hugging Face download cache.
+  - Disk still OK: `/root/autodl-tmp` has about 45G available.
+  - Next step: resume/retry download, preferably one file at a time or with lower parallelism to avoid another multi-file SSL drop.
+- Revised plan for one-GPU smoke experiments:
+  - Full LIBERO Spatial is not necessary for first training/debug.
+  - Use the 2 successfully downloaded raw task HDF5 files as a small subset.
+  - Generate at most 1 demo per task first to validate RGB-D replay, metric depth, K/T saving, dataset loading, and `use_depth=False/True` training.
+- Updated `experiments/robot/libero/regenerate_libero_rgbd_dataset.py` for subset workflows:
+  - Added `--skip_missing` so incomplete suite downloads do not block regeneration.
+  - Added `--task_names` for explicit task subsets.
+  - Added `--max_tasks` and `--max_demos_per_task`.
+  - Added `--skip_existing` and `--overwrite` to avoid interactive prompts.
+  - `py_compile` passed.
+- Generated a small RGB-D smoke dataset from the partially downloaded raw demos:
+  - Command used `--skip_missing --max_demos_per_task 1 --overwrite`.
+  - Raw input: `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial`.
+  - Output: `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_smoke`.
+  - Two raw task files were available; one replay succeeded and one replay failed.
+  - Kept the successful regenerated file and removed the empty failed-output HDF5.
+- Smoke RGB-D file summary:
+  - File: `pick_up_the_black_bowl_on_the_wooden_cabinet_and_place_it_on_the_plate_demo.hdf5`.
+  - Contains `demo_0` with 136 action steps.
+  - Saved fields include both RGB views, both metric depth views, both intrinsics matrices, both camera-to-base/world extrinsics, proprio, actions, states, rewards, and dones.
+  - `agentview_depth_m` stats after casting to float32:
+    - min: about `0.553m`
+    - max: about `3.068m`
+    - mean: about `1.341m`
+  - This confirms the saved depth is metric, not raw MuJoCo `[0, 1]`.
+- Ran real-HDF5 depth encoder smoke test:
+  - Input depth shape: `(1, 2, 256, 256, 1)`.
+  - `4x4` grid output: `(1, 32, 64)`, all finite.
+  - `8x8` grid output: `(1, 128, 64)`, all finite.
+  - Learnable depth gate `alpha` initialized to `0.01`.
+- Prepared training script for one-card smoke closure:
+  - Added `--use_wandb` config flag to `vla-scripts/finetune_depthvla.py`.
+  - Default is `False`, so smoke training will not require WandB login.
+  - `py_compile` passed.
+  - For smoke runs, use `--merge_lora_during_training False` to avoid saving a full merged 7B checkpoint.
+- Started RGB-only one-step smoke training:
+  - Dataset: `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_smoke`.
+  - Command sets `use_depth=False`, `batch_size=1`, `max_steps=1`, `save_freq=1`, `save_latest_checkpoint_only=True`, `lora_rank=4`, `merge_lora_during_training=False`, and `use_wandb=False`.
+  - Hugging Face cache is redirected to `/root/autodl-tmp/hf-cache`.
+  - `HF_HUB_DISABLE_XET=1` is set to avoid the Xet backend issue seen during dataset download.
+  - Current status: waiting for `openvla/openvla-7b` weights to finish downloading.
+  - Observed cache growth milestones: about `153M -> 833M -> 2.3G -> 4.2G -> 8.9G -> 13G -> 17G`.
+  - Download is slow but still progressing; this is expected to be the longest step of the first real OpenVLA-OFT smoke run.
+- `openvla/openvla-7b` download completed after about 1h13m:
+  - Hugging Face fetched all 18 files.
+  - Final cache size is about `15G`.
+  - Snapshot path exists under `/root/autodl-tmp/hf-cache/hub/models--openvla--openvla-7b/snapshots/...`.
+- First smoke train attempt failed after download, before training:
+  - Error: `ValueError: Default process group has not been initialized`.
+  - Cause: the script uses `dist.barrier()` and DDP wrappers, so it should be launched with `torchrun` even for a single GPU.
+  - Next action: rerun the same RGB-only smoke train with `torchrun --standalone --nproc_per_node=1`.
+- First `torchrun` retry failed immediately:
+  - It used the base environment `torchrun`, not the `depthvla` environment.
+  - Error: `ModuleNotFoundError: No module named 'draccus'`.
+  - Next action: rerun with `/root/miniconda3/envs/depthvla/bin/torchrun`.
+- RGB-only one-step smoke training succeeded with `depthvla` torchrun:
+  - Command used `/root/miniconda3/envs/depthvla/bin/torchrun --standalone --nproc_per_node=1`.
+  - Checkpoint files saved under:
+    - `/root/autodl-tmp/openvla-oft/runs_depthvla_smoke/openvla-7b+libero_spatial_rgbd_smoke+rgb-only+b1+lr-0.0001+lora-r4+dropout-0.0`
+  - Prefix token count printed by training: `513`.
+  - This matches `2 RGB views * 256 patches + 1 proprio token`.
+  - Checkpoint save completed, including dataset statistics, processor, LoRA adapter, proprio projector, and action head.
+- Next action:
+  - Run the same one-step smoke with `--use_depth True` and `--depth_grid_size 4`.
+- DepthVLA one-step smoke training succeeded:
+  - Command used `--use_depth True --depth_grid_size 4`.
+  - Checkpoint files saved under:
+    - `/root/autodl-tmp/openvla-oft/runs_depthvla_smoke/openvla-7b+libero_spatial_rgbd_smoke+depth-g4+b1+lr-0.0001+lora-r4+dropout-0.0`
+  - Trainable depth encoder params printed by training: `1,063,169`.
+  - Prefix token count printed by training: `545`.
+  - This matches `2 RGB views * 256 patches + 2 depth views * 4 * 4 tokens + 1 proprio token = 512 + 32 + 1`.
+  - Checkpoint save completed, including dataset statistics, processor, LoRA adapter, proprio projector, action head, and `depth_encoder--latest_checkpoint.pt`.
+- Smoke closure status:
+  - RGB-only baseline path completed.
+  - DepthVLA path completed.
+  - Dataset regeneration, metric depth validation, depth-token forward pass, model forward/backward, optimizer step, and checkpoint saving are all verified on the tiny smoke subset.
+- Disk usage after smoke:
+  - `runs_depthvla_smoke`: about `1.3G`.
+  - Hugging Face model cache: about `15G`.
+  - RGB-D smoke dataset: about `86M`.
+
+## 2026-05-29
+
+- User confirmed moving from smoke closure to actual training.
+- Current readiness check:
+  - No stale `finetune_depthvla.py`, `torchrun`, regeneration, or dataset download process is running.
+  - Available dataset for immediate training is still the tiny RGB-D smoke subset:
+    - `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_smoke`
+    - 1 successful regenerated demo, 136 action steps.
+  - Disk check:
+    - `/root/autodl-tmp`: about 29G available.
+    - `runs_depthvla_smoke`: about 1.3G.
+    - Hugging Face cache: about 15G.
+- Decision:
+  - Start with a small DepthVLA pilot train on the tiny subset, not final benchmark training.
+  - Purpose: validate sustained training beyond the one-step smoke run and confirm checkpointing over multiple optimizer steps.
+  - Planned run:
+    - `use_depth=True`
+    - `depth_grid_size=4`
+    - `batch_size=1`
+    - `max_steps=100`
+    - `save_freq=50`
+    - `save_latest_checkpoint_only=True`
+    - `merge_lora_during_training=False`
+    - `lora_rank=4`
+    - output root: `/root/autodl-tmp/openvla-oft/runs_depthvla_pilot`
+- DepthVLA pilot train completed successfully:
+  - Run directory:
+    - `/root/autodl-tmp/openvla-oft/runs_depthvla_pilot/openvla-7b+libero_spatial_rgbd_smoke+depth-g4+b1+lr-0.0001+lora-r4+dropout-0.0`
+  - Loaded cached OpenVLA weights without re-downloading.
+  - Prefix token count: `545`.
+  - Trainable params:
+    - LoRA: `13,853,536`
+    - proprio projector: `16,818,176`
+    - action head: `151,117,831`
+    - depth encoder: `1,063,169`
+    - total trainable: `182,852,712`
+  - Training reached `100/100` steps at about `4.2 steps/s`.
+  - Checkpoints saved at step 50 and step 100 using latest-checkpoint mode.
+  - Final files verified:
+    - `depth_encoder--latest_checkpoint.pt` (~2.1M)
+    - `action_head--latest_checkpoint.pt` (~302M)
+    - `proprio_projector--latest_checkpoint.pt` (~67M)
+    - `lora_adapter/adapter_model.safetensors` (~291M)
+    - `dataset_statistics.json`
+  - Pilot run size: about `634M`.
+- Current status:
+  - Multi-step DepthVLA training is confirmed working on one GPU.
+  - The current dataset is still too small for meaningful evaluation; it is only a pilot/overfit subset.
+  - Next meaningful step is to generate/download more successful RGB-D demos and then run matched RGB-only and DepthVLA training with the same data budget.
+
+## 2026-05-29 Stage 1 Execution
+
+- Started Stage 1 execution: generate `2 tasks x up to 10 demos` RGB-D data, train RGB-only and DepthVLA matched runs, and continue low-concurrency raw task downloads.
+- Preflight check at `2026-05-29 04:27:16 UTC`:
+  - No stale `finetune_depthvla.py`, `torchrun`, regeneration, or dataset download process is running.
+  - Current raw LIBERO-Spatial files available:
+    - `pick_up_the_black_bowl_on_the_stove_and_place_it_on_the_plate_demo.hdf5`
+    - `pick_up_the_black_bowl_on_the_wooden_cabinet_and_place_it_on_the_plate_demo.hdf5`
+  - Disk: `/root/autodl-tmp` has about 29G available.
+  - OpenVLA Hugging Face cache is present at `/root/autodl-tmp/hf-cache` and uses about 15G.
+- Next action:
+  - Run Stage 1 RGB-D regeneration into `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_2tasks_10demos`.
+- Stage 1 RGB-D regeneration completed at `2026-05-29 04:29:28 UTC`:
+  - Command used `--skip_missing --max_demos_per_task 10 --overwrite`.
+  - Output directory:
+    - `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_2tasks_10demos`
+  - Available raw tasks: 2.
+  - Total replayed demos: 20.
+  - Successful regenerated demos: 17.
+  - Total transitions: 2346.
+  - Output size: about 1.5G.
+  - Per-task success:
+    - `pick_up_the_black_bowl_on_the_stove_and_place_it_on_the_plate`: 7 successful demos.
+    - `pick_up_the_black_bowl_on_the_wooden_cabinet_and_place_it_on_the_plate`: 10 successful demos.
+  - HDF5 validation passed:
+    - Required fields are present for RGB, depth, intrinsics, extrinsics, proprio, and actions.
+    - Depth is metric:
+      - stove task `agentview_depth_m` first demo max about `3.068m`.
+      - wooden-cabinet task `agentview_depth_m` first demo max about `3.068m`.
+- Next action:
+  - Start Stage 1 RGB-only baseline training for 5000 steps.
+- Stage 1 RGB-only baseline training started:
+  - Dataset: `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_2tasks_10demos`.
+  - Output root: `/root/autodl-tmp/openvla-oft/runs_depthvla_stage1`.
+  - Settings: `use_depth=False`, `batch_size=1`, `max_steps=5000`, `save_freq=1000`, `lora_rank=4`, `learning_rate=1e-4`.
+  - Training printed prefix tokens: `513`.
+  - Observed speed after warmup: about `4.3 steps/s`.
+- Started raw-task download line:
+  - First attempted low-concurrency one-file Hugging Face download for `pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_demo.hdf5`.
+  - The first heredoc-style `conda run python - <<'PY'` attempt exited without output and did not materialize a file.
+  - Next action: retry with a direct `python -c` command.
+- Raw-task download retry succeeded:
+  - Downloaded:
+    - `pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_demo.hdf5`
+  - Target path:
+    - `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial/pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_demo.hdf5`
+  - Size: about 509M.
+  - HDF5 validation passed: file opens and contains 50 demos.
+- RGB-only training monitor:
+  - Around step ~296, speed remains about `4.2 steps/s`.
+  - GPU memory in use: about 23GB / 97GB.
+  - Next checkpoint target: step 1000.
+- RGB-only training reached step 1000:
+  - Checkpoint saved successfully at:
+    - `/root/autodl-tmp/openvla-oft/runs_depthvla_stage1/openvla-7b+libero_spatial_rgbd_2tasks_10demos+rgb-only+b1+lr-0.0001+lora-r4+dropout-0.0`
+  - Verified checkpoint files include:
+    - `lora_adapter/adapter_model.safetensors`
+    - `action_head--latest_checkpoint.pt`
+    - `proprio_projector--latest_checkpoint.pt`
+    - `dataset_statistics.json`
+  - Run directory size after step 1000: about 632M.
+  - Training continues toward step 5000.
+- Second raw-task download succeeded:
+  - Downloaded:
+    - `pick_up_the_black_bowl_next_to_the_ramekin_and_place_it_on_the_plate_demo.hdf5`
+  - Target path:
+    - `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial/pick_up_the_black_bowl_next_to_the_ramekin_and_place_it_on_the_plate_demo.hdf5`
+  - Size: about 672M.
+  - HDF5 validation passed: file opens and contains 50 demos.
+- Raw download line status:
+  - Added 2 new raw task files during RGB-only training.
+  - This satisfies the Stage 1 acceptance criterion of adding at least 1 raw task file.
+  - Pausing further downloads for now to avoid unnecessary network/disk contention while RGB-only training continues.
+- RGB-only training monitor at `2026-05-29 04:48:22 UTC`:
+  - Confirmed `torchrun` PID `5620` and worker PID `5651` are still active, not stale residual processes.
+  - Latest checkpoint files are present and updating under:
+    - `/root/autodl-tmp/openvla-oft/runs_depthvla_stage1/openvla-7b+libero_spatial_rgbd_2tasks_10demos+rgb-only+b1+lr-0.0001+lora-r4+dropout-0.0`
+  - Config confirms `use_depth=false`, `depth_grid_size=4`.
+  - GPU memory in use: about `23011MiB / 97887MiB`.
+  - Disk status: `/root/autodl-tmp` has about `27G` available.
+  - Action: waiting for natural completion to step 5000 before launching DepthVLA 4x4.
+- Stage 1 RGB-only baseline training completed at `2026-05-29 04:53:07 UTC`:
+  - Target steps: `5000`.
+  - Prefix tokens: `513`.
+  - Run directory:
+    - `/root/autodl-tmp/openvla-oft/runs_depthvla_stage1/openvla-7b+libero_spatial_rgbd_2tasks_10demos+rgb-only+b1+lr-0.0001+lora-r4+dropout-0.0`
+  - Verified checkpoint/artifact files:
+    - `lora_adapter/adapter_model.safetensors`
+    - `action_head--latest_checkpoint.pt`
+    - `proprio_projector--latest_checkpoint.pt`
+    - `dataset_statistics.json`
+    - `depthvla_config.json`
+  - Run directory size: about `632M`.
+  - No `finetune_depthvla.py` / `torchrun` process remains after completion.
+  - GPU is free again: `0MiB / 97887MiB` in use.
+- Next action:
+  - Launch Stage 1 DepthVLA 4x4 training using the same RGB-D dataset and matched optimizer settings, with `use_depth=True`, `depth_grid_size=4`, and `depth_hidden_dim=256`.
+- Stage 1 DepthVLA 4x4 training started at `2026-05-29 04:56:10 UTC`:
+  - Dataset: `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_2tasks_10demos`.
+  - Output root: `/root/autodl-tmp/openvla-oft/runs_depthvla_stage1`.
+  - Settings: `use_depth=True`, `depth_grid_size=4`, `depth_hidden_dim=256`, `batch_size=1`, `max_steps=5000`, `save_freq=1000`, `lora_rank=4`, `learning_rate=1e-4`.
+  - Training printed prefix tokens: `545`.
+  - Depth encoder trainable params: `1,063,169`.
+  - Total trainable params reported: `182,852,712`.
+  - Observed warmup speed: about `4.2 steps/s`.
+  - TensorFlow GPU registration warnings appeared again; these are expected and do not affect PyTorch CUDA training.
+  - Next checkpoint target: step `1000`, where `depth_encoder--latest_checkpoint.pt` should appear.
+- Stage 1 DepthVLA 4x4 reached checkpoint step `1000` at `2026-05-29 04:59:00 UTC`:
+  - Verified run directory:
+    - `/root/autodl-tmp/openvla-oft/runs_depthvla_stage1/openvla-7b+libero_spatial_rgbd_2tasks_10demos+depth-g4+b1+lr-0.0001+lora-r4+dropout-0.0`
+  - Verified checkpoint/artifact files include:
+    - `lora_adapter/adapter_model.safetensors`
+    - `action_head--latest_checkpoint.pt`
+    - `proprio_projector--latest_checkpoint.pt`
+    - `depth_encoder--latest_checkpoint.pt`
+    - `dataset_statistics.json`
+    - `depthvla_config.json`
+  - Run directory size after step 1000: about `634M`.
+  - GPU memory in use: about `23101MiB / 97887MiB`.
+  - Training continues toward step `5000`.
+- Stage 1 DepthVLA 4x4 monitor at `2026-05-29 05:03:25 UTC`:
+  - Training has passed step `2000` and remains active.
+  - Latest checkpoint files updated around local time `2026-05-29 13:02:50-13:02:51`:
+    - `action_head--latest_checkpoint.pt`
+    - `depth_encoder--latest_checkpoint.pt`
+  - GPU memory in use: about `23101MiB / 97887MiB`.
+  - GPU utilization observed: about `54%` during monitor sample.
+  - Training continues toward step `5000`.
+- Stage 1 DepthVLA 4x4 monitor at `2026-05-29 05:07:46 UTC`:
+  - Training has passed step `3000` and remains active.
+  - Latest checkpoint files updated around local time `2026-05-29 13:06:50`:
+    - `action_head--latest_checkpoint.pt`
+    - `depth_encoder--latest_checkpoint.pt`
+  - Combined Stage 1 run root size: about `1.3G`.
+  - Disk status: `/root/autodl-tmp` has about `26G` available.
+  - Training continues toward step `5000`.
+- Stage 1 DepthVLA 4x4 training completed at `2026-05-29 05:17:44 UTC`:
+  - Target steps: `5000`.
+  - Prefix tokens: `545`.
+  - Run directory:
+    - `/root/autodl-tmp/openvla-oft/runs_depthvla_stage1/openvla-7b+libero_spatial_rgbd_2tasks_10demos+depth-g4+b1+lr-0.0001+lora-r4+dropout-0.0`
+  - Verified checkpoint/artifact files:
+    - `lora_adapter/adapter_model.safetensors`
+    - `action_head--latest_checkpoint.pt`
+    - `proprio_projector--latest_checkpoint.pt`
+    - `depth_encoder--latest_checkpoint.pt`
+    - `dataset_statistics.json`
+    - `depthvla_config.json`
+  - Config confirms `use_depth=true`, `depth_grid_size=4`.
+  - Final training speed near completion: about `4.2 steps/s`.
+  - The final NCCL `destroy_process_group()` warning appeared at process exit; this is a common shutdown warning and did not prevent checkpoint saving.
+  - No `finetune_depthvla.py` / `torchrun` process remains after completion.
+  - GPU is free again: `0MiB / 97887MiB` in use.
+
+## 2026-05-29 Stage 1 Acceptance Summary
+
+- RGB-D dataset generation: complete.
+  - Dataset path: `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_2tasks_10demos`.
+  - Successful regenerated demos: `17`.
+  - Total transitions: `2346`.
+  - Metric depth/K/T/proprio/action validation: passed.
+- Matched RGB-only baseline: complete.
+  - Steps: `5000`.
+  - Prefix tokens: `513`.
+  - Checkpoint path:
+    - `/root/autodl-tmp/openvla-oft/runs_depthvla_stage1/openvla-7b+libero_spatial_rgbd_2tasks_10demos+rgb-only+b1+lr-0.0001+lora-r4+dropout-0.0`
+- Matched DepthVLA 4x4: complete.
+  - Steps: `5000`.
+  - Prefix tokens: `545`.
+  - Checkpoint path:
+    - `/root/autodl-tmp/openvla-oft/runs_depthvla_stage1/openvla-7b+libero_spatial_rgbd_2tasks_10demos+depth-g4+b1+lr-0.0001+lora-r4+dropout-0.0`
+- Raw task file download line: acceptance satisfied.
+  - Added and validated 2 new LIBERO-Spatial raw task files:
+    - `pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_demo.hdf5`
+    - `pick_up_the_black_bowl_next_to_the_ramekin_and_place_it_on_the_plate_demo.hdf5`
+- Resource status after Stage 1:
+  - Stage 1 run root size: about `1.3G`.
+  - Raw LIBERO-Spatial dir size: about `2.5G`.
+  - Stage 1 RGB-D dataset size: about `1.5G`.
+  - Hugging Face cache size: about `15G`.
+  - `/root/autodl-tmp` free space: about `26G`.
+- Stage 1 conclusion:
+  - The full matched training loop is now closed for both `use_depth=False` and `use_depth=True` on the same RGB-D HDF5 data.
+  - This is a pilot/overfit-scale dataset, not yet a meaningful benchmark result.
+  - Next recommended step is to regenerate a larger `5 tasks x 20 demos` RGB-D dataset using the newly downloaded raw files, then run the same matched pair again or start eval smoke tests on the Stage 1 checkpoints.
+
+## 2026-05-29 Stage 1 Eval Smoke
+
+- Started small matched eval setup at `2026-05-29 05:23:04 UTC`.
+- Added eval support needed for local Stage 1 LoRA checkpoints:
+  - `experiments/robot/openvla_utils.py` can now load a local `lora_adapter/` checkpoint by loading the base model from `--base_model_checkpoint` and applying the adapter.
+  - `get_processor()` can use `--processor_checkpoint` or `--base_model_checkpoint`, so local adapter-only checkpoints do not need a full model config.
+  - `experiments/robot/libero/run_libero_eval.py` now has `--base_model_checkpoint`, `--processor_checkpoint`, `--max_tasks`, and `--task_ids`.
+  - `check_unnorm_key()` now falls back to the single dataset-statistics key, which is needed because Stage 1 stats use `libero_spatial_rgbd_2tasks_10demos` rather than `libero_spatial`.
+- Validation:
+  - `python -m py_compile experiments/robot/openvla_utils.py experiments/robot/libero/run_libero_eval.py` passed.
+- Next action:
+  - Run a tiny matched rollout eval: first RGB-only, then DepthVLA 4x4, using one LIBERO-Spatial task and a small number of trials.
+- First RGB-only eval smoke attempt:
+  - Local base+LoRA loading worked: model loaded from `openvla/openvla-7b` and local `lora_adapter/` was applied.
+  - Eval stopped before rollout because LIBERO `get_task_init_states()` called `torch.load(init_states_path)` under PyTorch 2.6+ semantics, where `weights_only=True` is now default and rejects numpy-pickled init-state files.
+  - Fix applied in local LIBERO source:
+    - `/root/autodl-tmp/LIBERO/libero/libero/benchmark/__init__.py`
+    - changed init-state loading to `torch.load(init_states_path, weights_only=False)` for trusted local LIBERO files.
+  - Next action: rerun RGB-only eval smoke.
+- Second RGB-only eval smoke attempt:
+  - Model loading and LIBERO environment initialization succeeded.
+  - Rollout entered task 0 episode 1, but action prediction used base OpenVLA norm stats instead of Stage 1 HDF5 stats.
+  - Cause: after applying LoRA, `predict_action()` reads `norm_stats` from the underlying base model, while the loader only attached Stage 1 `dataset_statistics.json` to the outer wrapper.
+  - Fix applied in `experiments/robot/openvla_utils.py`:
+    - `_load_dataset_stats()` now also attaches `norm_stats` to `vla.get_base_model()` and `vla.base_model.model` when present.
+  - Validation: `python -m py_compile experiments/robot/openvla_utils.py` passed.
+  - Next action: rerun RGB-only eval smoke.
+- RGB-only eval smoke completed:
+  - Command used local RGB-only Stage 1 checkpoint with `--base_model_checkpoint openvla/openvla-7b` and `--task_ids 0 --num_trials_per_task 1`.
+  - Rollout completed without action/norm-stat errors.
+  - Result: `0/1` success on task 0.
+  - Log file:
+    - `./experiments/logs/EVAL-libero_spatial-openvla-2026_05_29-13_26_29--stage1-rgb-smoke.txt`
+  - Rollout video:
+    - `./rollouts/2026_05_29/2026_05_29-13_26_29--openvla_oft--episode=1--success=False--task=pick_up_the_black_bowl_between_the_plate_and_the_r.mp4`
+  - EGL cleanup warning appeared at process shutdown; checkpoint/eval result was already written.
+- Next action:
+  - Run matched DepthVLA 4x4 eval smoke with the same task and trial count.
+- DepthVLA 4x4 eval smoke completed:
+  - Command used local DepthVLA Stage 1 checkpoint with `--use_depth True --depth_grid_size 4` and the same task/trial count as RGB-only.
+  - Rollout completed without depth geometry, prefix, checkpoint, or norm-stat errors.
+  - Result: `0/1` success on task 0.
+  - Log file:
+    - `./experiments/logs/EVAL-libero_spatial-openvla-2026_05_29-13_27_25--stage1-depth-g4-smoke.txt`
+  - Rollout video:
+    - `./rollouts/2026_05_29/2026_05_29-13_27_25--openvla_oft--episode=1--success=False--task=pick_up_the_black_bowl_between_the_plate_and_the_r.mp4`
+- Interpretation update:
+  - Task 0 is `pick up the black bowl between the plate and the ramekin and place it on the plate`.
+  - This was one of the newly downloaded raw task files, not one of the two tasks used for Stage 1 training.
+  - Therefore the `0/1` vs `0/1` smoke result only validates the eval path; it is not an effect-size estimate.
+- Stage 1 trained task IDs in LIBERO-Spatial:
+  - Task 7: `pick up the black bowl on the stove and place it on the plate`.
+  - Task 9: `pick up the black bowl on the wooden cabinet and place it on the plate`.
+- Next action:
+  - Run a small in-distribution matched eval on task IDs `7,9`, with `3` trials per task for RGB-only and DepthVLA 4x4.
+- In-distribution small eval, RGB-only complete:
+  - Task IDs: `7,9`.
+  - Trials: `3` per task, `6` total.
+  - Result: `0/6` success, overall success rate `0.0%`.
+  - Task 7 stove: `0/3`.
+  - Task 9 wooden cabinet: `0/3`.
+  - Log file:
+    - `./experiments/logs/EVAL-libero_spatial-openvla-2026_05_29-13_28_47--stage1-rgb-t7t9-3trials.txt`
+- Next action:
+  - Run matched DepthVLA 4x4 eval on the same task IDs and trial count.
+- In-distribution small eval, DepthVLA 4x4 complete at `2026-05-29 05:32:02 UTC`:
+  - Task IDs: `7,9`.
+  - Trials: `3` per task, `6` total.
+  - Result: `0/6` success, overall success rate `0.0%`.
+  - Task 7 stove: `0/3`.
+  - Task 9 wooden cabinet: `0/3`.
+  - Log file:
+    - `./experiments/logs/EVAL-libero_spatial-openvla-2026_05_29-13_30_36--stage1-depth-g4-t7t9-3trials.txt`
+- Stage 1 small eval summary:
+  - Out-of-distribution smoke on task 0:
+    - RGB-only: `0/1`.
+    - DepthVLA 4x4: `0/1`.
+  - In-distribution trained tasks 7 and 9:
+    - RGB-only: `0/6`.
+    - DepthVLA 4x4: `0/6`.
+  - Interpretation:
+    - The eval path is now fully functional for both local LoRA-only RGB checkpoints and DepthVLA checkpoints.
+    - Depth geometry extraction, depth encoder loading, prefix/action slicing, and rollout-time action prediction all ran end-to-end.
+    - These scores do not show a depth advantage yet. More importantly, the matched RGB baseline also has `0/6`, so the Stage 1 pilot is too small/undertrained to produce a meaningful performance comparison.
+  - Practical next step:
+    - Generate the next dataset scale, preferably `5 tasks x 20 demos`, then run matched RGB-only and DepthVLA again.
+    - For faster diagnosis before long training, also inspect rollout videos to see whether policies are frozen, moving in the wrong frame, or failing only at grasp/placement.
+- Resource status after eval:
+  - GPU is free: `0MiB / 97887MiB` in use.
+  - `/root/autodl-tmp` free space: about `26G`.
+
+## 2026-05-29 Stage 2 Data Expansion
+
+- Started Stage 2 data expansion.
+- Current raw LIBERO-Spatial task files available: `4`.
+  - `pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_demo.hdf5`
+  - `pick_up_the_black_bowl_next_to_the_ramekin_and_place_it_on_the_plate_demo.hdf5`
+  - `pick_up_the_black_bowl_on_the_stove_and_place_it_on_the_plate_demo.hdf5`
+  - `pick_up_the_black_bowl_on_the_wooden_cabinet_and_place_it_on_the_plate_demo.hdf5`
+- Disk before expansion: `/root/autodl-tmp` has about `26G` free.
+- No active training/regeneration/download process is running.
+- Next action:
+  - Download one more raw task file to reach `5` tasks, starting with `pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate_demo.hdf5`.
+- Downloaded fifth LIBERO-Spatial raw task file:
+  - `pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate_demo.hdf5`
+  - Path: `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial/pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate_demo.hdf5`
+  - Size: about `590M`.
+  - HDF5 validation passed: file opens and contains `50` demos.
+- Next action:
+  - Generate Stage 2 RGB-D dataset: `5 tasks x up to 20 demos`.
+  - Target directory: `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_5tasks_20demos`.
+- Stage 2 RGB-D regeneration completed at `2026-05-29 05:41:50 UTC`:
+  - Command used `--skip_missing --max_demos_per_task 20 --overwrite`.
+  - Target directory:
+    - `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_5tasks_20demos`
+  - Selected 5 available raw tasks:
+    - `pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate`
+    - `pick_up_the_black_bowl_next_to_the_ramekin_and_place_it_on_the_plate`
+    - `pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate`
+    - `pick_up_the_black_bowl_on_the_stove_and_place_it_on_the_plate`
+    - `pick_up_the_black_bowl_on_the_wooden_cabinet_and_place_it_on_the_plate`
+  - Replayed demos: `100`.
+  - Successful regenerated demos: `89`.
+  - Total no-op actions filtered: `17`.
+  - EGL cleanup warning appeared after completion; dataset was already saved successfully.
+- Stage 2 RGB-D validation:
+  - Output files: `5` HDF5 files.
+  - Total successful demos in HDF5: `89`.
+  - Total transitions: `11037`.
+  - Output size: about `6.8G`.
+  - Raw LIBERO-Spatial dir size: about `3.0G`.
+  - Disk status after generation: `/root/autodl-tmp` has about `19G` free.
+  - Required fields validated under each demo:
+    - Root: `actions`, `states`, `robot_states`.
+    - Obs: `agentview_rgb`, `eye_in_hand_rgb`, `agentview_depth_m`, `eye_in_hand_depth_m`, `agentview_K`, `eye_in_hand_K`, `agentview_T_camera_to_base`, `eye_in_hand_T_camera_to_base`, `gripper_states`, `joint_states`, `ee_states`.
+  - Metric depth validation passed:
+    - Agentview depth max is about `3.0684m` across checked demos.
+- Per-task Stage 2 regenerated stats:
+  - `between_the_plate_and_the_ramekin`: `18` demos, `1673` transitions.
+  - `from_table_center`: `18` demos, `2087` transitions.
+  - `next_to_the_ramekin`: `18` demos, `2374` transitions.
+  - `on_the_stove`: `15` demos, `2034` transitions.
+  - `on_the_wooden_cabinet`: `20` demos, `2869` transitions.
+- Next recommended action:
+  - Run Stage 2 matched training on this dataset with the same recipe as Stage 1, likely increasing `max_steps` above `5000` because the dataset is about `4.7x` larger by transitions.
+
+## 2026-05-29 Stage 2 Matched Training
+
+- Starting Stage 2 matched training.
+- Dataset:
+  - `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_5tasks_20demos`
+  - `89` successful demos, `11037` transitions.
+- Training decision:
+  - Increase `max_steps` from Stage 1 `5000` to Stage 2 `20000`.
+  - Rationale: Stage 2 has about `4.7x` more transitions than Stage 1, so `20000` keeps sample reuse in the same rough range while remaining feasible on one GPU.
+- Matched settings:
+  - `batch_size=1`, `lora_rank=4`, `learning_rate=1e-4`, `save_freq=5000`, `save_latest_checkpoint_only=True`.
+  - RGB-only first, then DepthVLA 4x4.
+- Preflight:
+  - No active training/regeneration process.
+  - GPU free: `0MiB / 97887MiB`.
+  - Disk free: about `19G`.
+- Next action:
+  - Launch Stage 2 RGB-only baseline training.
+- Stage 2 RGB-only baseline training started:
+  - Dataset: `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_5tasks_20demos`.
+  - Output root: `/root/autodl-tmp/openvla-oft/runs_depthvla_stage2`.
+  - Settings: `use_depth=False`, `batch_size=1`, `max_steps=20000`, `save_freq=5000`, `save_latest_checkpoint_only=True`, `lora_rank=4`, `learning_rate=1e-4`.
+  - Prefix tokens: `513`.
+  - Total trainable params reported: `181,789,543`.
+  - Warmup speed: about `4.2 steps/s`.
+  - Estimated runtime: about `80` minutes for 20000 steps.
+  - Next checkpoint target: step `5000`.
+
+## 2026-05-29 Reviewer Notes
+
+- Spawned reviewer agent `Poincare` to independently assess the DepthVLA-OFT plan and current execution route.
+- Reviewer conclusion:
+  - The route is reasonable as an engineering closure and matched pilot.
+  - Stage 2 should be interpreted as a learning-signal experiment, not yet as a definitive DepthVLA hypothesis test.
+- Highest-priority findings:
+  - Stage 1 `0` success does not imply depth is ineffective; RGB-only was also `0`, so it mainly shows the pilot checkpoint did not learn a closed-loop policy yet.
+  - Before comparing depth, verify that Stage 2 RGB-only shows learning signal through offline action L1, action distribution sanity checks, and small closed-loop eval.
+  - Track train/eval mismatch carefully, especially eval `center_crop`; our eval commands already used `--center_crop False`, matching `image_aug=False` training, but this should remain explicit for all future evals.
+  - Stage 2 `89` demos / `11037` transitions is a reasonable next pilot, but still small; `20000` steps at batch 1 is only about `1.8x` transitions, so no-success after this would not prove method failure.
+  - `lora_rank=4` is conservative and may limit success; if Stage 2 RGB-only remains weak, consider rank `8/16`, longer training, or grad accumulation.
+  - `alpha=0.01` depth gate is safe but may make depth ignored; future diagnostics should log `alpha`, depth token norm, and depth encoder gradient norm.
+  - Stronger controls are recommended before final claims: `RGB + learned/null geometry tokens`, shuffled depth tokens, and real depth vs shuffled/null depth.
+- Reviewer-recommended next evaluation order:
+  - Evaluate RGB-only checkpoints first at `5k/10k/15k/20k`.
+  - Add offline train/val action L1 and action/gripper distribution checks.
+  - Do exact-overfit rollout on regenerated successful training demo initial states if possible.
+  - Only compare DepthVLA once RGB-only shows non-random or nonzero behavior.
+- Practical implication for current run:
+  - Let current Stage 2 RGB-only continue to at least first checkpoint.
+  - After `5000` checkpoint, run a small diagnostic eval and inspect action behavior before blindly launching full DepthVLA training.
+- Stage 2 RGB-only baseline training completed at `2026-05-29 07:20:32 UTC`:
+  - Target steps: `20000`.
+  - Prefix tokens: `513`.
+  - Runtime observed from progress bar: about `1:19:08`.
+  - Final speed near completion: about `4.2 steps/s`.
+  - Run directory:
+    - `/root/autodl-tmp/openvla-oft/runs_depthvla_stage2/openvla-7b+libero_spatial_rgbd_5tasks_20demos+rgb-only+b1+lr-0.0001+lora-r4+dropout-0.0`
+  - Verified checkpoint/artifact files:
+    - `lora_adapter/adapter_model.safetensors`
+    - `action_head--latest_checkpoint.pt`
+    - `proprio_projector--latest_checkpoint.pt`
+    - `dataset_statistics.json`
+    - `depthvla_config.json`
+  - Final NCCL `destroy_process_group()` warning appeared at process exit; checkpoint saving was successful.
+  - GPU is free again: `0MiB / 97887MiB` in use.
+  - Stage 2 run root size: about `632M`.
+  - Disk status: `/root/autodl-tmp` has about `18G` free.
+- Next recommended action:
+  - Run RGB-only diagnostic eval/checks before launching DepthVLA, following reviewer guidance.
+
+## 2026-05-29 Stage 2 RGB-only Eval
+
+- Starting Stage 2 RGB-only diagnostic eval.
+- Checkpoint:
+  - `/root/autodl-tmp/openvla-oft/runs_depthvla_stage2/openvla-7b+libero_spatial_rgbd_5tasks_20demos+rgb-only+b1+lr-0.0001+lora-r4+dropout-0.0`
+- Eval scope:
+  - Task IDs: `0,1,2,7,9`.
+  - Trials per task: `3`.
+  - Total episodes: `15`.
+- Important eval settings:
+  - `--center_crop False`, matching `image_aug=False` training.
+  - `--num_images_in_input 2`, `--use_proprio True`, `--use_l1_regression True`.
+  - Base model loaded from `openvla/openvla-7b`, local LoRA/action/proprio heads loaded from Stage 2 checkpoint.
+- Stage 2 RGB-only diagnostic eval completed at `2026-05-29 07:24:09 UTC`:
+  - Task IDs: `0,1,2,7,9`.
+  - Trials per task: `3`.
+  - Total episodes: `15`.
+  - Total successes: `15`.
+  - Overall success rate: `100.0%`.
+  - Per-task success from log: all evaluated tasks were `3/3`.
+  - Log file:
+    - `./experiments/logs/EVAL-libero_spatial-openvla-2026_05_29-15_21_56--stage2-rgb-t01279-3trials.txt`
+  - Rollout videos were saved under:
+    - `./rollouts/2026_05_29/2026_05_29-15_21_56--openvla_oft--episode=*.mp4`
+  - EGL cleanup warning appeared at process shutdown; eval results and videos were already saved.
+- Interpretation:
+  - Stage 2 RGB-only baseline now has a clear closed-loop learning signal on the 5 trained tasks.
+  - This resolves the Stage 1 concern that the baseline itself was not learning.
+  - It is now meaningful to launch matched Stage 2 DepthVLA 4x4 training and compare under the same data/step budget.
+- Resource status after eval:
+  - GPU free: `0MiB / 97887MiB`.
+  - Disk free: about `18G`.
+
+## 2026-05-29 Stage 2 DepthVLA 4x4 Training
+
+- Starting matched Stage 2 DepthVLA 4x4 training.
+- Dataset:
+  - `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_5tasks_20demos`
+- Matched RGB-only reference:
+  - Completed `20000` steps.
+  - Clean diagnostic eval on trained tasks `0,1,2,7,9`: `15/15` success.
+- DepthVLA settings:
+  - `use_depth=True`, `depth_grid_size=4`, `depth_hidden_dim=256`.
+  - `batch_size=1`, `max_steps=20000`, `save_freq=5000`, `save_latest_checkpoint_only=True`.
+  - `lora_rank=4`, `learning_rate=1e-4`.
+- Preflight:
+  - No active training/eval process.
+  - GPU free: `0MiB / 97887MiB`.
+  - Disk free: about `18G`.
+- Stage 2 DepthVLA 4x4 training started successfully:
+  - Prefix tokens: `545`.
+  - Depth encoder trainable params: `1,063,169`.
+  - Total trainable params reported: `182,852,712`.
+  - Warmup speed: about `4.1 steps/s`.
+  - Expected runtime for `20000` steps: about `80-82` minutes.
+  - Next checkpoint target: step `5000`, including `depth_encoder--latest_checkpoint.pt`.
+
+### 2026-05-29 08:30:28 UTC Status Check
+
+- Stage 2 DepthVLA 4x4 training is still running normally.
+- Current progress observed from training session:
+  - Step: about `13257 / 20000`.
+  - Completion: about `66.3%`.
+  - Elapsed training time: about `59m21s`.
+  - Current speed: about `3.8-4.0 steps/s`.
+  - Estimated remaining time: about `29-31` minutes.
+- No action taken; continue monitoring until completion, then run matched clean eval on task IDs `0,1,2,7,9`.
+
+### 2026-05-29 08:59:45 UTC Training Complete
+
+- Stage 2 DepthVLA 4x4 training completed successfully.
+- Final step: `20000 / 20000`.
+- Runtime reported by trainer: about `1h28m16s`.
+- Checkpoint directory:
+  - `/root/autodl-tmp/openvla-oft/runs_depthvla_stage2/openvla-7b+libero_spatial_rgbd_5tasks_20demos+depth-g4+b1+lr-0.0001+lora-r4+dropout-0.0`
+- Verified checkpoint artifacts:
+  - `lora_adapter/`
+  - `action_head--latest_checkpoint.pt`
+  - `proprio_projector--latest_checkpoint.pt`
+  - `depth_encoder--latest_checkpoint.pt`
+  - `dataset_statistics.json`
+- Resource status before eval:
+  - GPU: `0 MiB / 97887 MiB`, utilization `0%`.
+- Next action:
+  - Launch matched clean eval on LIBERO-Spatial task IDs `0,1,2,7,9`, `3` trials per task, `use_depth=True`, `depth_grid_size=4`, `center_crop=False`.
+
+### 2026-05-29 09:02:44 UTC DepthVLA 4x4 Eval Complete
+
+- Matched clean eval command completed successfully.
+- Evaluated checkpoint:
+  - `/root/autodl-tmp/openvla-oft/runs_depthvla_stage2/openvla-7b+libero_spatial_rgbd_5tasks_20demos+depth-g4+b1+lr-0.0001+lora-r4+dropout-0.0`
+- Eval configuration:
+  - Task suite: `libero_spatial`.
+  - Task IDs: `0,1,2,7,9`.
+  - Trials: `3` per task, `15` total episodes.
+  - `use_depth=True`, `depth_grid_size=4`, `depth_hidden_dim=256`.
+  - `center_crop=False`.
+- Result:
+  - Total successes: `10 / 15`.
+  - Overall success rate: `66.7%`.
+- Per-task observed success counts:
+  - Task `0`: `3 / 3`.
+  - Task `1`: `2 / 3`.
+  - Task `2`: `2 / 3`.
+  - Task `7`: `2 / 3`.
+  - Task `9`: `1 / 3`.
+- Matched RGB-only reference:
+  - Same task IDs and trials: `15 / 15`, `100%`.
+- Log file:
+  - `experiments/logs/EVAL-libero_spatial-openvla-2026_05_29-17_00_26--stage2-depth-g4-t01279-3trials.txt`
+- Rollout videos:
+  - `rollouts/2026_05_29/2026_05_29-17_00_26--openvla_oft--episode=*.mp4`
+- Interpretation:
+  - DepthVLA 4x4 has a closed-loop learning signal, but under the current 5-task / 20k-step / LoRA-r4 budget it underperforms the matched RGB-only baseline on clean trained tasks.
+  - This suggests the appended depth tokens may be perturbing the learned prefix/action representation, or the depth branch needs more controlled training, gating, data, or ablations before clean-task gains should be expected.
+- Resource status after eval:
+  - GPU: `0 MiB / 97887 MiB`, utilization `0%`.
+  - Disk: `/root/autodl-tmp` has about `18G` free.
+
+## 2026-05-29 DepthVLA Diagnostics and Ablations
+
+- Added eval-time depth ablation support:
+  - `depth_ablation_mode=none`: normal trained DepthVLA behavior.
+  - `depth_ablation_mode=null`: keeps the same number of depth tokens but zeros the pooled geometry features before the MLP.
+  - `depth_ablation_mode=shuffle_tokens`: keeps the same geometry feature values but deterministically shuffles depth-token order before the MLP.
+- Added diagnostic script:
+  - `vla-scripts/check_depthvla_diagnostics.py`
+- Diagnostic command:
+  - `/root/miniconda3/envs/depthvla/bin/python vla-scripts/check_depthvla_diagnostics.py --checkpoint_dir /root/autodl-tmp/openvla-oft/runs_depthvla_stage2/openvla-7b+libero_spatial_rgbd_5tasks_20demos+depth-g4+b1+lr-0.0001+lora-r4+dropout-0.0 --rgbd_data_dir /root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_5tasks_20demos --depth_grid_size 4`
+- Diagnostic result:
+  - Loaded depth checkpoint successfully.
+  - `alpha=0.00885010`, so the depth gate did not grow excessively from its `0.01` initialization.
+  - `depth_tokens=32`.
+  - `prefix_tokens_with_proprio=545`.
+  - `normal_shape=(1, 32, 4096)`.
+  - No NaNs in depth tokens.
+  - `normal_abs_mean=0.00707143`, `normal_l2=3.20436358`.
+  - `null_abs_mean=0.00709301`, `null_l2=3.20176816`.
+  - `normal_vs_null_l2=3.16846633`.
+  - `normal_vs_shuffle_l2=2.02674842`.
+  - Metric depth sample range: `0.041779m` to `3.068359m`.
+  - Rotation grid check passed: first rotated coarse token corresponds to raw bottom-right cell, and last token corresponds to raw top-left cell.
+- Initial interpretation:
+  - The clean-eval drop is unlikely to be caused by an overgrown depth gate.
+  - Prefix count and coarse 180-degree token ordering look consistent.
+  - Need closed-loop ablations to separate same-token-count disturbance from geometry content/order effects.
+- Attempted null-depth eval with `--depth_ablation_mode null`, but `draccus`/YAML parsed the CLI string `null` as Python `None`, producing `Unknown depth ablation mode: None`.
+- Killed the invalid eval process and patched eval init to map `None` back to `"null"` for this diagnostic mode.
+- The first compatibility patch was not sufficient because the mode also reached the encoder as `"None"`/`None`; patched the encoder-side ablation parser to normalize modes case-insensitively and treat `None` as `"null"`.
+- The invalid partial run is not counted as an ablation result.
+
+### Null-Depth Token Ablation
+
+- Valid command:
+  - `MUJOCO_GL=egl PYOPENGL_PLATFORM=egl HF_HOME=/root/autodl-tmp/hf-cache HF_HUB_DISABLE_XET=1 TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=0 /root/miniconda3/envs/depthvla/bin/python experiments/robot/libero/run_libero_eval.py --pretrained_checkpoint /root/autodl-tmp/openvla-oft/runs_depthvla_stage2/openvla-7b+libero_spatial_rgbd_5tasks_20demos+depth-g4+b1+lr-0.0001+lora-r4+dropout-0.0 --base_model_checkpoint openvla/openvla-7b --processor_checkpoint openvla/openvla-7b --task_suite_name libero_spatial --task_ids 0,1,2,7,9 --num_trials_per_task 3 --use_depth True --depth_grid_size 4 --depth_hidden_dim 256 --depth_ablation_mode null --use_l1_regression True --use_proprio True --num_images_in_input 2 --lora_rank 4 --center_crop False --use_wandb False --run_id_note stage2-depth-g4-null-t01279-3trials-final`
+- Result:
+  - Total successes: `11 / 15`.
+  - Overall success rate: `73.3%`.
+- Per-task observed success counts:
+  - Task `0`: `3 / 3`.
+  - Task `1`: `3 / 3`.
+  - Task `2`: `2 / 3`.
+  - Task `7`: `2 / 3`.
+  - Task `9`: `1 / 3`.
+- Log file:
+  - `experiments/logs/EVAL-libero_spatial-openvla-2026_05_29-17_22_21--stage2-depth-g4-null-t01279-3trials-final.txt`
+- Immediate interpretation:
+  - Null-depth tokens perform slightly better than normal DepthVLA 4x4 (`11/15` vs `10/15`) but remain below matched RGB-only (`15/15`).
+  - This suggests part of the degradation comes from adding the depth branch/tokens to the prefix at all, not only from metric geometry content.
+  - Since null is not worse than normal depth, clean trained-task eval does not yet show useful exploitation of the real 4x4 geometry tokens.
+
+### Shuffled Depth-Token Ablation
+
+- Command:
+  - `MUJOCO_GL=egl PYOPENGL_PLATFORM=egl HF_HOME=/root/autodl-tmp/hf-cache HF_HUB_DISABLE_XET=1 TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=0 /root/miniconda3/envs/depthvla/bin/python experiments/robot/libero/run_libero_eval.py --pretrained_checkpoint /root/autodl-tmp/openvla-oft/runs_depthvla_stage2/openvla-7b+libero_spatial_rgbd_5tasks_20demos+depth-g4+b1+lr-0.0001+lora-r4+dropout-0.0 --base_model_checkpoint openvla/openvla-7b --processor_checkpoint openvla/openvla-7b --task_suite_name libero_spatial --task_ids 0,1,2,7,9 --num_trials_per_task 3 --use_depth True --depth_grid_size 4 --depth_hidden_dim 256 --depth_ablation_mode shuffle_tokens --use_l1_regression True --use_proprio True --num_images_in_input 2 --lora_rank 4 --center_crop False --use_wandb False --run_id_note stage2-depth-g4-shuffle-t01279-3trials`
+- Result:
+  - Total successes: `13 / 15`.
+  - Overall success rate: `86.7%`.
+- Per-task observed success counts:
+  - Task `0`: `3 / 3`.
+  - Task `1`: `3 / 3`.
+  - Task `2`: `1 / 3`.
+  - Task `7`: `3 / 3`.
+  - Task `9`: `3 / 3`.
+- Log file:
+  - `experiments/logs/EVAL-libero_spatial-openvla-2026_05_29-17_26_16--stage2-depth-g4-shuffle-t01279-3trials.txt`
+- Comparison table:
+  - Matched RGB-only: `15 / 15` (`100%`).
+  - Normal DepthVLA 4x4: `10 / 15` (`66.7%`).
+  - Null-depth tokens: `11 / 15` (`73.3%`).
+  - Shuffled depth tokens: `13 / 15` (`86.7%`).
+- Interpretation:
+  - Shuffling the learned geometry-token order improves over normal ordered depth tokens in this small eval.
+  - This is strong evidence that the current ordered metric geometry tokens are not being exploited as intended on clean trained tasks.
+  - The degradation is unlikely to be caused by an oversized alpha gate or prefix slice bug; diagnostics showed `alpha=0.00885010`, prefix `545`, no NaNs, and a passing 180-degree grid-flip check.
+  - More likely causes: insufficient data for the new geometry branch, distribution/scale mismatch in base-frame geometry features, or the appended tokens interfering with the LLM prefix in a way the small LoRA-r4/20k run has not learned to resolve.
+- Resource status after ablations:
+  - GPU: `0 MiB / 97887 MiB`, utilization `0%`.
+  - Disk: `/root/autodl-tmp` has about `18G` free.
+
+## 2026-05-29 Geometry Normalization Implementation
+
+- Implemented dataset-level normalization for DepthVLA continuous geometry features.
+- Normalized dimensions only:
+  - `X_base`, `Y_base`, `Z_base`, `z_camera`.
+- Left unchanged:
+  - `valid`, `u_norm`, `v_norm`, `view_id`.
+- Added config flags:
+  - Training: `--geometry_norm none|dataset_std`, default `none`.
+  - Training: `--geometry_clip 5.0`, default `5.0`.
+  - Eval: `--geometry_norm none|dataset_std`, default `none`.
+  - Eval: `--geometry_clip 5.0`, default `5.0`.
+- Training behavior when `--geometry_norm dataset_std`:
+  - Computes stats over the training HDF5 split using the same pooled pre-MLP geometry features consumed by the depth encoder.
+  - Saves stats to `geometry_norm_stats.json` in the run/checkpoint directory.
+  - Applies `(x - mean) / (std + 1e-6)` to the first four geometry feature dimensions.
+  - Clips normalized values to `[-geometry_clip, geometry_clip]` when `geometry_clip > 0`.
+  - Prints raw stats, normalized stats, and before/after feature examples.
+- Eval behavior when `--geometry_norm dataset_std`:
+  - Loads `geometry_norm_stats.json` from `--pretrained_checkpoint`.
+  - Applies the same normalization and clipping in the depth encoder before token projection.
+- Files changed:
+  - `prismatic/models/depth_encoder.py`
+  - `vla-scripts/finetune_depthvla.py`
+  - `experiments/robot/openvla_utils.py`
+  - `experiments/robot/libero/run_libero_eval.py`
+  - `PROGRESS.md`
+- Verification:
+  - `python -m py_compile` passed for all changed Python files.
+  - Local smoke test computed geometry stats on a small HDF5 subset and confirmed normalized continuous features have near-zero mean and unit std before clipping.
+- Notes:
+  - Model structure, token count, depth gate `alpha`, and append-only fusion logic were not changed.
+  - Existing checkpoints without `geometry_norm_stats.json` remain usable with `--geometry_norm none`.
+  - To evaluate normalized models, the checkpoint must contain the matching `geometry_norm_stats.json`.
+
+## 2026-05-30 Stage 2 DepthVLA 4x4 Dataset-Std Geometry Norm Run
+
+- Started normalized DepthVLA 4x4 experiment at `2026-05-30 03:08:41 UTC`.
+- Purpose:
+  - Test whether dataset-level normalization of `[X_base, Y_base, Z_base, z_camera]` fixes the degradation seen in normal DepthVLA 4x4.
+- Matched reference results:
+  - RGB-only Stage 2: `15 / 15` (`100%`).
+  - DepthVLA 4x4 no geometry norm: `10 / 15` (`66.7%`).
+  - Null-depth tokens: `11 / 15` (`73.3%`).
+  - Shuffled depth tokens: `13 / 15` (`86.7%`).
+- Planned training settings:
+  - Dataset: `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_5tasks_20demos`.
+  - `use_depth=True`, `depth_grid_size=4`, `depth_hidden_dim=256`.
+  - `geometry_norm=dataset_std`, `geometry_clip=5.0`.
+  - Alpha init remains `0.01`; no alpha or fusion change.
+  - `batch_size=1`, `max_steps=20000`, `save_freq=5000`, `save_latest_checkpoint_only=True`.
+  - `lora_rank=4`, `learning_rate=1e-4`.
+- Preflight:
+  - No active `finetune_depthvla.py`, `run_libero_eval.py`, or `torchrun` process.
+  - GPU memory: `0 MiB / 97887 MiB`.
+  - Disk free on `/root/autodl-tmp`: about `18G`.
+
+### 2026-05-30 Normalized Training Restart Note
+
+- First `geometry_norm=dataset_std` training attempt was stopped before training started.
+- Reason:
+  - Process reached an early single-GPU DDP/NCCL `dist.barrier()` warning and then stayed quiet with only about `1.2GB` GPU memory in use for several minutes.
+  - No checkpoint or training step was produced.
+- Fix applied:
+  - Added `distributed_barrier()` in `vla-scripts/finetune_depthvla.py` using `dist.barrier(device_ids=[torch.cuda.current_device()])` when CUDA is available.
+  - Replaced bare `dist.barrier()` calls in the training script.
+  - `py_compile` passed after the patch.
+- Restart time: `2026-05-30 03:21:27 UTC`.
+
+### 2026-05-30 Normalized Training Second Restart Note
+
+- Second attempt also stayed in early initialization with only about `1.2GB` GPU memory in use.
+- Likely cause:
+  - `--vla_path openvla/openvla-7b` enters `snapshot_download()` and may perform a slow or hanging online Hugging Face cache check.
+- Action:
+  - Stop the online-check attempt before any training step or checkpoint was produced.
+  - Restart using the local cached OpenVLA snapshot directly:
+    `/root/autodl-tmp/hf-cache/hub/models--openvla--openvla-7b/snapshots/47a0ec7fc4ec123775a391911046cf33cf9ed83f`.
+  - Use `--run_id_override` so the run directory remains clearly named as `openvla-7b + dataset_std` rather than the snapshot hash.
+- Restart time: `2026-05-30 03:30:11 UTC`.
+
+### 2026-05-30 Normalized Training Running
+
+- Restart using local OpenVLA snapshot succeeded.
+- Model loading completed and training entered the progress bar.
+- Geometry normalization stats were computed and saved to:
+  - `/root/autodl-tmp/openvla-oft/runs_depthvla_stage2/openvla-7b+libero_spatial_rgbd_5tasks_20demos+depth-g4+geom-dataset_std+clip-5.0+b1+lr-0.0001+lora-r4+dropout-0.0/geometry_norm_stats.json`
+- Raw geometry stats:
+  - `X_base`: mean `-0.174706`, std `0.262814`, min `-0.938010`, max `0.370620`, p1 `-0.938010`, p99 `0.185711`.
+  - `Y_base`: mean `0.046676`, std `0.298471`, min `-1.556097`, max `1.242419`, p1 `-0.851865`, p99 `0.843037`.
+  - `Z_base`: mean `0.802868`, std `0.504610`, min `-1.075128`, max `1.374163`, p1 `-0.754483`, p99 `1.299346`.
+  - `z_camera`: mean `0.786793`, std `0.733165`, min `0.058048`, max `2.727905`, p1 `0.067578`, p99 `2.727905`.
+- After `dataset_std` normalization and clip `5.0`:
+  - Means are near `0` and stds near `1` for all four continuous geometry features.
+- Training sanity:
+  - Prefix tokens: `545`.
+  - Total trainable params: `182,852,712`.
+  - Run directory: `/root/autodl-tmp/openvla-oft/runs_depthvla_stage2/openvla-7b+libero_spatial_rgbd_5tasks_20demos+depth-g4+geom-dataset_std+clip-5.0+b1+lr-0.0001+lora-r4+dropout-0.0`.
+  - Early speed: about `3.1-3.3 steps/s`.
+
+### 2026-05-30 Normalized Training Step 5000 Checkpoint
+
+- DepthVLA 4x4 + `geometry_norm=dataset_std` training reached and saved the step `5000` checkpoint.
+- Checkpoint save log confirmed:
+  - `dataset_statistics.json`
+  - `geometry_norm_stats.json`
+  - DepthVLA checkpoint files
+- Verified run directory contains:
+  - `lora_adapter/`
+  - `action_head--latest_checkpoint.pt`
+  - `proprio_projector--latest_checkpoint.pt`
+  - `depth_encoder--latest_checkpoint.pt`
+  - `dataset_statistics.json`
+  - `geometry_norm_stats.json`
+- Progress after save: about `5110 / 20000`.
+- Resource snapshot:
+  - GPU memory: about `23133 MiB / 97887 MiB`.
+  - GPU utilization sample: about `15%`.
+- Training continues toward step `10000`, then `15000`, then final `20000`.

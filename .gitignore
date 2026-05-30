@@ -1,0 +1,11 @@
+hf-cache/
+**/*.hdf5
+**/*.incomplete
+openvla-oft/runs_depthvla_*
+openvla-oft/experiments/logs/
+LIBERO/libero/datasets/
+__pycache__/
+*.pth
+*.pt
+*.bin
+*.tar.gz
