@@ -1000,3 +1000,1775 @@
   - GPU memory: about `23133 MiB / 97887 MiB`.
   - GPU utilization sample: about `15%`.
 - Training continues toward step `10000`, then `15000`, then final `20000`.
+
+### 2026-05-30 Normalized DepthVLA Training and Eval Complete
+
+- DepthVLA 4x4 + `geometry_norm=dataset_std` + `geometry_clip=5.0` training completed successfully.
+- Final training step: `20000 / 20000`.
+- Runtime reported by trainer: about `1h46m56s`.
+- Final checkpoint directory:
+  - `/root/autodl-tmp/openvla-oft/runs_depthvla_stage2/openvla-7b+libero_spatial_rgbd_5tasks_20demos+depth-g4+geom-dataset_std+clip-5.0+b1+lr-0.0001+lora-r4+dropout-0.0`
+- Verified final artifacts:
+  - `lora_adapter/`
+  - `action_head--latest_checkpoint.pt`
+  - `proprio_projector--latest_checkpoint.pt`
+  - `depth_encoder--latest_checkpoint.pt`
+  - `dataset_statistics.json`
+  - `geometry_norm_stats.json`
+- Matched clean eval completed on LIBERO-Spatial task IDs `0,1,2,7,9`, `3` trials per task.
+- Eval config:
+  - `use_depth=True`, `depth_grid_size=4`, `depth_hidden_dim=256`.
+  - `geometry_norm=dataset_std`, `geometry_clip=5.0`.
+  - `center_crop=False`, `use_proprio=True`, `num_images_in_input=2`.
+- Eval result:
+  - Total successes: `6 / 15`.
+  - Overall success rate: `40.0%`.
+- Per-task observed success counts:
+  - Task `0`: `0 / 3`.
+  - Task `1`: `1 / 3`.
+  - Task `2`: `2 / 3`.
+  - Task `7`: `1 / 3`.
+  - Task `9`: `2 / 3`.
+- Log file:
+  - `experiments/logs/EVAL-libero_spatial-openvla-2026_05_30-14_07_02--stage2-depth-g4-geomstd-t01279-3trials.txt`
+- Rollout videos:
+  - `rollouts/2026_05_30/2026_05_30-14_07_02--openvla_oft--episode=*.mp4`
+- Comparison on the same eval scope:
+  - Matched RGB-only: `15 / 15` (`100%`).
+  - DepthVLA 4x4 no geometry norm: `10 / 15` (`66.7%`).
+  - Null-depth tokens: `11 / 15` (`73.3%`).
+  - Shuffled depth tokens: `13 / 15` (`86.7%`).
+  - DepthVLA 4x4 + `dataset_std` geometry norm: `6 / 15` (`40.0%`).
+- Interpretation:
+  - Dataset-level geometry standardization did not fix the clean trained-task degradation; it made this run worse than the unnormalized DepthVLA checkpoint.
+  - This suggests raw feature scale mismatch is not the main bottleneck, or the current normalized geometry distribution/optimization path needs a different training recipe.
+  - Next likely ablations: lower depth gate init such as `alpha=0.001`, alpha warmup/freeze, or training a same-token-count learned/null geometry-token control.
+
+## 2026-05-30 Action-Head Fusion Branch
+
+- Created git branch: `Action-head-fusion`.
+- Motivation:
+  - Recent DepthVLA ablations showed prefix-appended depth tokens degrade clean trained-task performance.
+  - Literature search suggested keeping RGB/VLM prefix stable and injecting 3D/depth closer to the action expert/action head.
+- Implemented first action-head fusion prototype:
+  - Added `--depth_fusion_mode prefix|action_head`.
+  - Existing behavior remains `prefix`, where depth tokens are appended to the VLM prefix.
+  - New `action_head` mode keeps the VLM prefix at RGB/proprio length and feeds depth tokens only to the continuous action head.
+  - Added gated FiLM-style depth conditioning inside `L1RegressionActionHead`.
+  - Added `--depth_action_fusion_gate_init`, default `0.01`.
+  - Added optional auxiliary spatial loss via `--depth_aux_spatial_loss_weight`.
+  - Auxiliary target is the normalized current action xyz delta, predicted from pooled depth context.
+- Files changed:
+  - `prismatic/models/action_heads.py`
+  - `prismatic/extern/hf/modeling_prismatic.py`
+  - `vla-scripts/finetune_depthvla.py`
+  - `experiments/robot/openvla_utils.py`
+  - `experiments/robot/libero/run_libero_eval.py`
+- Verification:
+  - `python -m py_compile` passed for all changed files.
+  - Module smoke test passed: depth tokens `(B,32,D)`, action output `(B,8,7)`, spatial output `(B,3)`, gradients reached both `depth_fusion_gate` and depth encoder `alpha`.
+  - One-step real training smoke passed on `libero_spatial_rgbd_smoke`.
+  - Training smoke printed `DepthVLA prefix tokens: 513`, confirming action-head fusion does not append depth tokens to the prefix.
+  - Checkpoint saved under `/root/autodl-tmp/openvla-oft/runs_depthvla_action_fusion_smoke/action-fusion-smoke`.
+  - One-episode eval smoke loaded the new checkpoint and completed a LIBERO rollout path.
+- Smoke eval note:
+  - The 1-step checkpoint scored `0/1`, as expected; this only validates code path, not model quality.
+- Next formal experiment candidate:
+  - Train on Stage 2 data for `20000` steps with `--depth_fusion_mode action_head`, `--geometry_norm none`, and a small spatial auxiliary weight such as `0.05` or `0.1`.
+
+### 2026-05-30 Action-Head Fusion Stage 2 Training Start
+
+- Starting formal Stage 2 training on branch `Action-head-fusion`.
+- Dataset:
+  - `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_5tasks_20demos`
+- Configuration:
+  - `use_depth=True`
+  - `depth_fusion_mode=action_head`
+  - `geometry_norm=none`
+  - `depth_grid_size=4`, `depth_hidden_dim=256`
+  - `depth_action_fusion_gate_init=0.01`
+  - `depth_aux_spatial_loss_weight=0.05`
+  - `batch_size=1`, `max_steps=20000`, `save_freq=5000`
+  - `lora_rank=4`, `learning_rate=1e-4`
+- Preflight:
+  - No stale training/eval processes.
+  - GPU free: `0 MiB / 97887 MiB`.
+  - Disk free under `/root/autodl-tmp`: about `17G`.
+- Run root:
+  - `/root/autodl-tmp/openvla-oft/runs_depthvla_action_fusion_stage2`
+
+### 2026-05-30 Action-Head Fusion Training Interruption / Midpoint Eval
+
+- The training terminal session ended before the final monitor handoff.
+- No active `finetune_depthvla.py` / `torchrun` process remains.
+- Latest checkpoint artifacts are present and timestamped around `2026-05-30 15:45 UTC`.
+- Based on elapsed time and save frequency, this likely corresponds to an intermediate checkpoint around the `10000` step save point, not the intended full `20000` step run.
+- Disk remains OK: about `16G` free under `/root/autodl-tmp`.
+- Action: run diagnostic eval on the latest available checkpoint before deciding whether to resume/continue to `20000`.
+
+### 2026-05-30 DepthVLA Action-Fusion v1 Experiment Plan Template
+
+- Goal:
+  - Test whether moving depth from prefix append to action-side fusion reduces disruption to the pretrained RGB/VLM policy.
+- Modes to compare:
+  - `rgb_only`: matched RGB-only OpenVLA-OFT trained on the regenerated HDF5 pipeline.
+  - `depth_prefix_append`: existing append-token DepthVLA path.
+  - `depth_action_fusion`: new action-side depth fusion path.
+- v1 action-fusion structure:
+  - RGB agentview + wrist inputs stay on the OpenVLA-OFT prefix path.
+  - Metric depth/K/T preprocessing stays unchanged.
+  - Depth encoder outputs geometry tokens, but they are not appended to the VLM prefix.
+  - Geometry tokens are mean-pooled into one compact geometry embedding per sample.
+  - The pooled embedding modulates action hidden states inside `L1RegressionActionHead` through gated FiLM/residual conditioning.
+  - Default gate init: `0.001`.
+  - Default auxiliary losses: none (`depth_aux_spatial_loss_weight=0.0`).
+- Matched training recipe:
+  - Dataset: `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_5tasks_20demos`.
+  - Dataset name: `libero_spatial_rgbd_5tasks_20demos`.
+  - `image_aug=False`, `use_proprio=True`, `num_images_in_input=2`.
+  - `depth_grid_size=4`, `depth_hidden_dim=256`, `geometry_norm=none`.
+  - `batch_size=1`, `max_steps=20000`, `save_freq=5000`.
+  - `lora_rank=4`, `learning_rate=1e-4`.
+  - `merge_lora_during_training=False`, `save_latest_checkpoint_only=True`.
+- Eval scope:
+  - LIBERO-Spatial task IDs: `0,1,2,7,9`.
+  - Trials per task: `3`.
+  - Report total success rate and per-task success counts.
+- Diagnostics to check in logs:
+  - `DepthVLA integration mode: depth_action_fusion`.
+  - `DepthVLA appends depth tokens to prefix: False`.
+  - `DepthVLA depth token count included in prefix: 0`.
+  - Depth token/context shape, pooled geometry embedding shape, action hidden shape before/after fusion.
+  - `DepthVLA action fusion gate` initial/current value.
+
+
+### 2026-05-30 Action-Head Fusion Midpoint Eval Complete
+
+- Evaluated latest available action-head fusion checkpoint:
+  - `/root/autodl-tmp/openvla-oft/runs_depthvla_action_fusion_stage2/openvla-7b+libero_spatial_rgbd_5tasks_20demos+depth-g4+fusion-action_head+spatial-0.05+b1+lr-0.0001+lora-r4+dropout-0.0`
+- Important note:
+  - This is likely an intermediate checkpoint around the `10000` step save point, not the intended full `20000` step checkpoint.
+- Eval configuration:
+  - Task suite: `libero_spatial`.
+  - Task IDs: `0,1,2,7,9`.
+  - Trials: `3` per task, `15` total episodes.
+  - `use_depth=True`, `depth_fusion_mode=action_head`, `depth_grid_size=4`, `depth_hidden_dim=256`.
+  - `geometry_norm=none`.
+  - `center_crop=False`.
+- Eval-time loading check:
+  - DepthVLA integration mode: `depth_action_fusion`.
+  - Depth tokens are not appended to prefix.
+  - Action fusion gate current value printed as about `0.0120239`.
+- Result:
+  - Total successes: `5 / 15`.
+  - Overall success rate: `33.3%`.
+- Per-task observed success counts:
+  - Task `0`: `0 / 3`.
+  - Task `1`: `0 / 3`.
+  - Task `2`: `2 / 3`.
+  - Task `7`: `1 / 3`.
+  - Task `9`: `2 / 3`.
+- Log file:
+  - `experiments/logs/EVAL-libero_spatial-openvla-2026_05_30-16_07_55--action-fusion-spatial005-midpoint-t01279-3trials.txt`
+- Rollout videos:
+  - `rollouts/2026_05_30/2026_05_30-16_07_55--openvla_oft--episode=*.mp4`
+- Comparison so far on the same eval scope:
+  - RGB-only: `15 / 15` (`100%`).
+  - DepthVLA 4x4 prefix/no norm: `10 / 15` (`66.7%`).
+  - DepthVLA 4x4 prefix + `dataset_std`: `6 / 15` (`40.0%`).
+  - Action-head fusion + spatial `0.05` midpoint/latest: `5 / 15` (`33.3%`).
+- Interpretation:
+  - This action-head fusion prototype does not yet recover RGB-only behavior at the evaluated checkpoint.
+  - Because the checkpoint is likely intermediate, this result should be treated as an early signal, not a final 20k comparison.
+  - The poor result suggests the new larger action head / depth-conditioning path may need either full matched training, lower auxiliary weight, or initialization from the trained RGB-only action head rather than training a larger action head from scratch.
+
+### 2026-05-30 Action Residual Adapter v2 Implementation
+
+- Implemented a smaller and safer depth adapter path: `depth_action_residual` / `depth_fusion_mode=action_residual`.
+- Motivation:
+  - The previous action-head fusion v1 changed the action head too much and trained the larger conditional head from scratch, which likely destroyed the strong RGB-only policy.
+  - v2 preserves the original RGB action-head mapping and adds only a small gated residual from depth.
+- Design:
+  - Base action prediction remains the normal `L1RegressionActionHead` output.
+  - Depth encoder outputs geometry tokens, pooled into a depth context.
+  - A small residual adapter predicts `delta_action` from `[action_context, depth_context]`.
+  - Final normalized action is `rgb_action + gate * delta_action`.
+  - The residual adapter final layer is zero-initialized, so initial behavior is exactly RGB action output.
+  - Gate default is `0.001`.
+- Added config/support:
+  - Training/eval mode alias: `--depth_integration_mode depth_action_residual`.
+  - Legacy equivalent: `--depth_fusion_mode action_residual`.
+  - Added `--depth_adapter_hidden_dim`, default `256`.
+  - Added `--resume_components_from` so training can load LoRA, proprio projector, and action head from the trained RGB-only checkpoint while still loading the base model from the local OpenVLA snapshot.
+- Files changed:
+  - `prismatic/models/action_heads.py`
+  - `prismatic/extern/hf/modeling_prismatic.py`
+  - `vla-scripts/finetune_depthvla.py`
+  - `experiments/robot/openvla_utils.py`
+  - `experiments/robot/libero/run_libero_eval.py`
+- Verification:
+  - `python -m py_compile` passed for changed files.
+  - Module smoke test loaded an RGB-only action head into residual-adapter action head with `strict=False`.
+  - Missing keys were only the new adapter parameters; unexpected keys were `0`.
+  - Initial `delta_action` was exactly zero because the adapter final layer is zero-initialized.
+  - Real 1-step training smoke passed using:
+    - Base model: local OpenVLA snapshot.
+    - `resume_components_from`: Stage 2 RGB-only checkpoint (`15/15` eval baseline).
+    - `depth_integration_mode=depth_action_residual`.
+  - Smoke training confirmed:
+    - LoRA adapter loaded from RGB-only checkpoint.
+    - Proprio projector loaded from RGB-only checkpoint.
+    - Action head loaded with `strict=False`; missing adapter keys `13`, unexpected `0`.
+    - `DepthVLA prefix tokens: 513` and `depth token count included in prefix: 0`.
+    - Initial action residual abs mean: `0`.
+  - One-episode eval smoke loaded the residual-adapter checkpoint and completed rollout.
+- Recommended formal experiment:
+  - Start from Stage 2 RGB-only components via `--resume_components_from`.
+  - Train `depth_action_residual` with `geometry_norm=none`.
+  - First run with `depth_aux_spatial_loss_weight=0.0` to preserve RGB behavior.
+  - Only add small auxiliary spatial loss, e.g. `0.01`, after confirming the residual adapter does not destroy the RGB baseline.
+
+### 2026-05-30 Action Residual Phase A Start
+
+- Starting formal Phase A after reviewer feedback.
+- Goal:
+  - Preserve the Stage 2 RGB-only policy and train only a small depth residual adapter.
+- Key reviewer-driven changes:
+  - Adapter final layer remains zero-initialized.
+  - Gate is set to `1.0` instead of `0.001` so the zero-initialized residual still starts at exactly zero but can learn with stronger gradients.
+  - Auxiliary spatial loss is disabled for the first formal run: `0.0`.
+- Initialization:
+  - Base OpenVLA loaded from local snapshot.
+  - LoRA, proprio projector, and base action head initialized from Stage 2 RGB-only checkpoint (`15/15` eval baseline).
+- Freezing:
+  - `freeze_vla_lora=True`.
+  - `freeze_proprio_projector=True`.
+  - `freeze_action_head_base=True`.
+  - Trainable components: depth encoder + residual adapter/gate.
+- Smoke verification before formal run:
+  - Prefix tokens: `513`.
+  - Depth tokens included in prefix: `0`.
+  - Initial action residual abs mean: `0`.
+  - Trainable params: about `4.24M`.
+- Formal run:
+  - Dataset: Stage 2 `libero_spatial_rgbd_5tasks_20demos`.
+  - Steps: `5000`.
+  - Save latest checkpoint only.
+  - Run root: `/root/autodl-tmp/openvla-oft/runs_depthvla_action_residual_phaseA`.
+
+### 2026-05-30 Action Residual Phase A Result
+
+- Formal Phase A training completed successfully.
+- Checkpoint:
+  - `/root/autodl-tmp/openvla-oft/runs_depthvla_action_residual_phaseA/openvla-7b+libero_spatial_rgbd_5tasks_20demos+depth-g4+action-residual+frozen-rgb+gate-1.0+aux-0.0+b1+lr-0.0001+lora-r4+dropout-0.0`
+- Training settings:
+  - `depth_integration_mode=depth_action_residual`.
+  - `depth_grid_size=4`, `depth_hidden_dim=256`.
+  - `geometry_norm=none`.
+  - `depth_action_fusion_gate_init=1.0`.
+  - `depth_aux_spatial_loss_weight=0.0`.
+  - Started from Stage 2 RGB-only components via `resume_components_from`.
+  - Frozen components: VLA LoRA, proprio projector, and base action-head parameters.
+  - Trainable components: depth encoder, residual adapter, gate, and adapter-side heads.
+  - Trainable params at launch: about `4.24M`.
+  - Prefix tokens: `513`; depth tokens included in prefix: `0`.
+  - Initial action residual abs mean: `0`.
+  - Runtime: about `9m39s` for `5000` steps at about `8.6-8.7 steps/s`.
+- Checkpoint artifacts verified:
+  - `action_head--latest_checkpoint.pt`
+  - `depth_encoder--latest_checkpoint.pt`
+  - `proprio_projector--latest_checkpoint.pt`
+  - `lora_adapter/`
+  - `dataset_statistics.json`
+  - `depthvla_config.json`
+- Matched clean eval completed:
+  - Task suite: `libero_spatial`.
+  - Task IDs: `0,1,2,7,9`.
+  - Trials: `3` per task, `15` total episodes.
+  - Eval mode: `depth_action_residual`, `center_crop=False`, `num_images_in_input=2`, `use_proprio=True`.
+  - Total successes: `13 / 15`.
+  - Overall success rate: `86.7%`.
+- Per-task observed success counts:
+  - Task `0`: `3 / 3`.
+  - Task `1`: `2 / 3`.
+  - Task `2`: `3 / 3`.
+  - Task `7`: `3 / 3`.
+  - Task `9`: `2 / 3`.
+- Log file:
+  - `experiments/logs/EVAL-libero_spatial-openvla-2026_05_30-16_59_00--action-residual-phaseA-5k-t01279-3trials.txt`
+- Rollout videos:
+  - `rollouts/2026_05_30/2026_05_30-16_59_00--openvla_oft--episode=*.mp4`
+- Comparison table on the same 5 trained LIBERO-Spatial tasks:
+  - Stage 2 RGB-only: `15 / 15` (`100%`).
+  - DepthVLA prefix append, no geometry norm: `10 / 15` (`66.7%`).
+  - Null depth tokens: `11 / 15` (`73.3%`).
+  - Shuffled depth tokens: `13 / 15` (`86.7%`).
+  - DepthVLA prefix append + `dataset_std`: `6 / 15` (`40.0%`).
+  - Action-head fusion v1 + spatial `0.05`: `5 / 15` (`33.3%`).
+  - Action residual Phase A, frozen RGB, gate `1.0`, aux `0.0`, `5k`: `13 / 15` (`86.7%`).
+- Interpretation:
+  - The small action residual adapter recovers much more of the RGB-only policy than prefix-appended depth tokens or the earlier large action-head fusion prototype.
+  - It still does not match the RGB-only checkpoint on clean trained tasks.
+  - Because this run trains only depth-side residual parameters for `5k` steps, the result is a promising architecture sanity check rather than a final depth-gain result.
+  - Next diagnostic should compare real depth against `null` and `shuffle_tokens` in the same residual-adapter checkpoint. If real depth is not better than ablated depth, the residual adapter is mostly acting as a small extra action adapter rather than exploiting geometry.
+
+### 2026-05-30 Action Residual Phase A Depth Ablations
+
+- Ran closed-loop ablations on the Phase A `depth_action_residual` checkpoint.
+- Same eval scope for all rows:
+  - LIBERO-Spatial task IDs `0,1,2,7,9`.
+  - `3` trials per task, `15` total episodes.
+  - `center_crop=False`, `num_images_in_input=2`, `use_proprio=True`.
+  - Checkpoint:
+    - `/root/autodl-tmp/openvla-oft/runs_depthvla_action_residual_phaseA/openvla-7b+libero_spatial_rgbd_5tasks_20demos+depth-g4+action-residual+frozen-rgb+gate-1.0+aux-0.0+b1+lr-0.0001+lora-r4+dropout-0.0`
+- Results:
+  - Normal depth: `13 / 15` (`86.7%`).
+  - Null depth features: `13 / 15` (`86.7%`).
+  - Shuffled depth-token order: `13 / 15` (`86.7%`).
+- Per-task success counts were identical across all three modes:
+  - Task `0`: `3 / 3`.
+  - Task `1`: `2 / 3`.
+  - Task `2`: `3 / 3`.
+  - Task `7`: `3 / 3`.
+  - Task `9`: `2 / 3`.
+- Ablation log files:
+  - Normal:
+    - `experiments/logs/EVAL-libero_spatial-openvla-2026_05_30-16_59_00--action-residual-phaseA-5k-t01279-3trials.txt`
+  - Null:
+    - `experiments/logs/EVAL-libero_spatial-openvla-2026_05_30-17_07_02--action-residual-phaseA-5k-null-t01279-3trials.txt`
+  - Shuffle:
+    - `experiments/logs/EVAL-libero_spatial-openvla-2026_05_30-17_09_44--action-residual-phaseA-5k-shuffle-t01279-3trials.txt`
+- Interpretation:
+  - The residual-adapter architecture is safer than prefix append because it preserves much more of the RGB-only policy.
+  - However, Phase A does not yet demonstrate use of real metric depth: zeroed geometry and shuffled geometry produce the same score and same episode-level success pattern as normal depth.
+  - Current likely explanation: the residual adapter learned a small task/action correction from training supervision, while the depth context is either ignored or used only as a weak nuisance input.
+  - The next improvement should add a stronger depth-specific learning pressure without letting the depth path destroy the RGB policy.
+- Recommended next experiment:
+  - Keep the action residual architecture and RGB-policy freezing.
+  - Add a small auxiliary spatial objective, starting conservatively with `depth_aux_spatial_loss_weight=0.01` rather than `0.05`.
+  - Consider adding diagnostics for residual norm, depth-context norm, and real-vs-null `delta_action` distance during training/eval.
+  - Acceptance criterion for a depth-aware improvement should be `normal > null` and `normal > shuffle`, not just a high clean-task success rate.
+
+## 2026-05-30 Action Summary Aux v1 Branch
+
+- Created new experiment branch:
+  - `exp/action-summary-aux-v1`
+- Implemented a minimal `depth_action_summary_aux` mode.
+- Supported modes now include:
+  - `rgb_only`
+  - `depth_prefix_append`
+  - `depth_action_fusion`
+  - `depth_action_residual`
+  - `depth_action_summary_aux`
+- Design goal:
+  - Keep the OpenVLA RGB/proprio prefix path unchanged.
+  - Do not append depth tokens to the LLM prefix in the new mode.
+  - Convert RGB-D geometry tokens into one compact action-side summary embedding.
+  - Use a small gated residual on action hidden states plus a small auxiliary spatial/action loss.
+- Depth summary encoder:
+  - Reuses the existing metric depth, intrinsics, extrinsics, and pooled geometry feature construction.
+  - Encodes each geometry cell with the existing lightweight geometry MLP.
+  - Reshapes encoded cells by view and mean-pools each view.
+  - Concatenates the two view summaries and projects them through a small MLP.
+  - Output shape: `[B, llm_dim]`.
+  - Implemented as optional `LightweightDepthTokenEncoder(enable_summary=True)` and `forward_summary(...)`, preserving old token-path checkpoint behavior when disabled.
+- Action-side fusion:
+  - New action head fusion type: `action_summary_aux`.
+  - Fusion is action-side only:
+    - `depth_summary -> small MLP -> delta_h`
+    - `h_fused = h_action + gate * delta_h`
+  - Gate default remains `0.001`, so initial behavior stays close to RGB-only.
+  - The final layer of the summary-conditioning MLP is zero-initialized.
+- Auxiliary target:
+  - The auxiliary head predicts the first action step's normalized translation components: `actions[:, 0, :3]`.
+  - Rationale: this is the most direct low-dimensional action-related spatial signal already available in the matched HDF5 training labels, requiring no object detector or new labels.
+  - Loss: Smooth L1.
+  - Total loss in the new mode:
+    - `total_loss = main_action_l1 + depth_aux_spatial_loss_weight * smooth_l1(aux_xyz_pred, actions[:, 0, :3])`
+  - Default `depth_aux_spatial_loss_weight` is now `0.05`, but the auxiliary loss is gated to the new `action_summary_aux` fusion path so existing residual/prefix paths are not unintentionally changed.
+- Diagnostics added / preserved:
+  - Prints `DepthVLA integration mode` and `depth_fusion_mode`.
+  - Prints whether depth is appended to prefix.
+  - Prints action hidden shape before/after fusion.
+  - Prints depth summary embedding shape in the new mode.
+  - Prints gate value.
+  - Prints main action L1 loss and auxiliary spatial loss on the first logged batch.
+  - Tracks `spatial_aux_loss`, weighted auxiliary loss, and gate in training metrics.
+- Files changed:
+  - `prismatic/models/depth_encoder.py`
+  - `prismatic/models/action_heads.py`
+  - `prismatic/extern/hf/modeling_prismatic.py`
+  - `vla-scripts/finetune_depthvla.py`
+  - `experiments/robot/openvla_utils.py`
+  - `experiments/robot/libero/run_libero_eval.py`
+  - `PROGRESS.md`
+- Verification:
+  - `python -m py_compile` passed for all changed Python files.
+  - Lightweight module smoke test passed:
+    - depth summary shape: `(2, 64)`.
+    - fused action hidden shape: `(2, 56, 64)`.
+    - predicted action shape: `(2, 8, 7)`.
+    - auxiliary spatial prediction shape: `(2, 3)`.
+    - initial gate: `0.001`.
+- Planned training command shape:
+  - Use the same Stage 2 RGB-D dataset and comparable settings as prior runs.
+  - Recommended first full run:
+    - `--depth_integration_mode depth_action_summary_aux`
+    - `--geometry_norm none`
+    - `--depth_action_fusion_gate_init 0.001`
+    - `--depth_aux_spatial_loss_weight 0.05`
+    - `--batch_size 1`
+    - `--max_steps 20000`
+    - `--lora_rank 4`
+    - `--learning_rate 1e-4`
+    - `--center_crop False` for eval.
+- Planned eval:
+  - Task IDs: `0,1,2,7,9`.
+  - Trials: `3` per task.
+  - Run normal, `--depth_ablation_mode null`, and `--depth_ablation_mode shuffle_tokens` on the same checkpoint.
+  - Acceptance criterion is not only high success rate; the key signal is `normal > null` and `normal > shuffle`.
+
+## 2026-05-30 Action Summary Aux v1 Validation
+
+- Validation question:
+  - Does the compact action-side summary encoder solve the prefix disturbance problem?
+  - Does the auxiliary spatial loss solve the "model can ignore depth" problem?
+- Controlled setup:
+  - Dataset: `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_5tasks_20demos`.
+  - Started from the strong Stage 2 RGB-only checkpoint components:
+    - `/root/autodl-tmp/openvla-oft/runs_depthvla_stage2/openvla-7b+libero_spatial_rgbd_5tasks_20demos+rgb-only+b1+lr-0.0001+lora-r4+dropout-0.0`
+  - Frozen components: VLA LoRA, proprio projector, and base action head.
+  - Trainable components: depth summary encoder, action-side summary residual adapter/gate, and auxiliary spatial head when aux weight is nonzero.
+  - Settings: `depth_integration_mode=depth_action_summary_aux`, `geometry_norm=none`, `depth_grid_size=4`, `depth_action_fusion_gate_init=0.001`, `batch_size=1`, `learning_rate=1e-4`, `lora_rank=4`, `max_steps=5000`.
+  - Eval task IDs: `0,1,2,7,9`; trials: `3` per task, `15` total.
+
+### Aux Weight 0.0: Encoder / Summary-Only Test
+
+- Training completed successfully.
+- Checkpoint:
+  - `/root/autodl-tmp/openvla-oft/runs_depthvla_action_summary_v1/openvla-7b+libero_spatial_rgbd_5tasks_20demos+depth-g4+action-summary+frozen-rgb+gate-0.001+aux-0.0+b1+lr-0.0001+lora-r4+dropout-0.0`
+- Training diagnostics:
+  - Prefix tokens: `513`.
+  - Depth token count included in prefix: `0`.
+  - Trainable params: about `7.4M`.
+  - Depth summary embedding shape: `(1, 4096)`.
+  - Action hidden before/after fusion: `(1, 56, 4096)`.
+  - Gate trained from about `0.001` to `0.00994873`.
+  - No auxiliary loss was active.
+- Eval results:
+  - Normal depth: `13 / 15` (`86.7%`). Per task `0,1,2,7,9`: `3/3`, `3/3`, `3/3`, `1/3`, `3/3`.
+  - Null depth: `13 / 15` (`86.7%`). Per task `0,1,2,7,9`: `3/3`, `3/3`, `3/3`, `1/3`, `3/3`.
+  - Shuffled depth tokens: `14 / 15` (`93.3%`). Per task `0,1,2,7,9`: `3/3`, `3/3`, `3/3`, `2/3`, `3/3`.
+- Logs:
+  - `experiments/logs/EVAL-libero_spatial-openvla-2026_05_30-18_16_03--action-summary-aux0-5k-normal-t01279-3trials.txt`
+  - `experiments/logs/EVAL-libero_spatial-openvla-2026_05_30-18_22_22--action-summary-aux0-5k-null-t01279-3trials.txt`
+  - `experiments/logs/EVAL-libero_spatial-openvla-2026_05_30-18_31_16--action-summary-aux0-5k-shuffle-t01279-3trials.txt`
+- Interpretation:
+  - The summary/action-side design is much less destructive than prefix append: prefix append normal was `10/15`, while summary/action-side aux=0 normal is `13/15`.
+  - But normal is not better than null or shuffle.
+  - Therefore the compact summary encoder/action-side adapter improves stability, but this run does not show that the policy uses real depth geometry.
+
+### Aux Weight 0.05: Small Spatial Auxiliary Loss Test
+
+- Training completed successfully.
+- Checkpoint:
+  - `/root/autodl-tmp/openvla-oft/runs_depthvla_action_summary_v1/openvla-7b+libero_spatial_rgbd_5tasks_20demos+depth-g4+action-summary+frozen-rgb+gate-0.001+aux-0.05+b1+lr-0.0001+lora-r4+dropout-0.0`
+- Training diagnostics:
+  - Prefix tokens: `513`.
+  - Depth token count included in prefix: `0`.
+  - Trainable params: about `7.4M`.
+  - Depth summary embedding shape: `(1, 4096)`.
+  - Action hidden before/after fusion: `(1, 56, 4096)`.
+  - First batch main action L1: `0.123535`.
+  - First batch auxiliary spatial loss: `0.120605`.
+  - Auxiliary loss weight: `0.05`.
+  - Gate trained from about `0.001` to `0.00866699`.
+- Eval results:
+  - Normal depth: `13 / 15` (`86.7%`). Per task `0,1,2,7,9`: `2/3`, `3/3`, `3/3`, `2/3`, `3/3`.
+  - Null depth: `13 / 15` (`86.7%`). Per task `0,1,2,7,9`: `2/3`, `3/3`, `3/3`, `2/3`, `3/3`.
+  - Shuffled depth tokens: `14 / 15` (`93.3%`). Per task `0,1,2,7,9`: `3/3`, `3/3`, `3/3`, `2/3`, `3/3`.
+- Logs:
+  - `experiments/logs/EVAL-libero_spatial-openvla-2026_05_30-18_45_48--action-summary-aux005-5k-normal-t01279-3trials.txt`
+  - `experiments/logs/EVAL-libero_spatial-openvla-2026_05_30-18_48_48--action-summary-aux005-5k-null-t01279-3trials.txt`
+  - `experiments/logs/EVAL-libero_spatial-openvla-2026_05_30-18_51_43--action-summary-aux005-5k-shuffle-t01279-3trials.txt`
+- Interpretation:
+  - The small auxiliary loss did not produce the desired ablation separation in this 5k controlled run.
+  - Normal depth is tied with null depth, and shuffled depth is slightly higher.
+  - This suggests the chosen auxiliary target, normalized next-action `delta xyz`, is not sufficient by itself to force useful geometric grounding in closed-loop behavior.
+  - It may be too easy to predict from RGB/proprio/task bias or too weakly coupled to rollout success.
+
+### Validation Conclusion
+
+- Encoder/summary question:
+  - Partially solved.
+  - Compact action-side summary avoids the major prefix perturbation seen in depth prefix append.
+  - It keeps performance near the RGB-only policy family while leaving RGB prefix untouched.
+- "Lazy depth" question:
+  - Not solved by the current aux target/weight at 5k steps.
+  - Both aux=0 and aux=0.05 fail the key criterion `normal > null` and `normal > shuffle`.
+- Current best read:
+  - DepthVLA's main issue has shifted.
+  - The new architecture reduces interference, but the depth pathway still behaves like an action-side adapter rather than a depth-dependent policy input.
+- Recommended next fixes:
+  - Strengthen the auxiliary signal so it cannot be satisfied by task/action priors alone: predict short-horizon end-effector displacement from depth summary plus proprio, predict object-relative or gripper-to-target spatial quantities if labels can be derived from simulator states, or add a contrastive depth corruption loss where normal summaries must fit labels better than null/shuffle summaries.
+  - Increase pressure on using depth carefully: test larger gate init or learned per-dim gate after verifying it does not destabilize RGB-only behavior, and consider depth dropout/corruption during training with an explicit consistency or ranking term.
+  - Run more than `3` trials per task before treating small `13/15` vs `14/15` differences as real effects.
+
+## 2026-05-30 Geometry-Dependent Auxiliary Target v2
+
+- Motivation:
+  - Previous `depth_action_summary_aux` with auxiliary target `actions[:, 0, :3]` improved stability but did not force depth usage.
+  - Ablations stayed tied or favored shuffled depth: normal/null/shuffle did not separate.
+  - The old aux target could likely be solved from action/task priors rather than real geometry.
+- Evaluated target-pose feasibility:
+  - Regenerated RGB-D HDF5 contains `obs/ee_pos` / `obs/ee_states`, metric depths, intrinsics, extrinsics, and flattened MuJoCo `states`.
+  - It does not store named target object poses or a reliable object-state schema.
+  - Directly using `target_pos - ee_pos` would require guessing state indices, which is too risky for a controlled MVP.
+- Selected MVP target:
+  - Default new `--aux_target distance_bin`.
+  - It computes a geometry-only proxy from existing HDF5 data:
+    - back-project sparse `agentview_depth_m` with `agentview_K` and `agentview_T_camera_to_base` into base-frame points,
+    - filter to a conservative tabletop/workspace region,
+    - compute nearest visible geometry point relative to `ee_pos`,
+    - classify gripper-to-visible-geometry distance into 3 bins.
+  - Dataset-derived distance tertiles from Stage 2 RGB-D data:
+    - q33: about `0.036m`.
+    - q66: about `0.065m`.
+  - Default bin edges: `--aux_distance_bin_edges 0.036,0.065`.
+- Why this target is better than next-action xyz:
+  - It depends directly on metric depth, K, T, and ee pose.
+  - It is not a direct copy of the action label.
+  - It is harder to satisfy purely from task/action priors, while still being available without new labels.
+- Config support added:
+  - `--aux_target none`.
+  - `--aux_target next_action_xyz` for backward compatibility.
+  - `--aux_target relative_xyz`.
+  - `--aux_target relative_z_bin`.
+  - `--aux_target distance_bin` as the new default.
+  - `--aux_output_dim 3`.
+  - `--aux_distance_bin_edges 0.036,0.065`.
+  - `--aux_z_bin_edges -0.04,0.04`.
+- Implementation notes:
+  - Kept action-side summary structure unchanged.
+  - Kept depth integration mode unchanged; no prefix changes.
+  - `distance_bin` / `relative_z_bin` use cross entropy over 3 classes.
+  - `relative_xyz` / `next_action_xyz` use Smooth L1.
+  - Training diagnostics now print aux target type, prediction shape, label shape, aux loss, and aux weight.
+- Files changed:
+  - `vla-scripts/finetune_depthvla.py`.
+  - `prismatic/models/action_heads.py`.
+  - `PROGRESS.md`.
+- Verification:
+  - `python -m py_compile` passed for changed Python files.
+  - 1-step smoke training passed with `--aux_target distance_bin`:
+    - Prefix tokens: `513`.
+    - Depth tokens in prefix: `0`.
+    - Depth summary shape: `(1, 4096)`.
+    - Action hidden before/after fusion: `(1, 56, 4096)`.
+    - Aux prediction shape: `(1, 3)`.
+    - Aux label shape: `(1,)`.
+    - First batch main action L1: `0.0727539`.
+    - First batch distance-bin aux loss: `0.914864`.
+- Next planned run:
+  - Train the same frozen-RGB 5k controlled recipe with `--aux_target distance_bin` and `--depth_aux_spatial_loss_weight 0.05`.
+  - Then evaluate normal/null/shuffle on task IDs `0,1,2,7,9`, 3 trials each.
+
+### Distance-Bin Aux 5k Controlled Run
+
+- Training command used the same frozen-RGB 5k controlled recipe as prior action-summary runs, with the only core change:
+  - `--aux_target distance_bin`
+  - `--aux_distance_bin_edges 0.036,0.065`
+  - `--depth_aux_spatial_loss_weight 0.05`
+- Checkpoint:
+  - `/root/autodl-tmp/openvla-oft/runs_depthvla_action_summary_v1/openvla-7b+libero_spatial_rgbd_5tasks_20demos+depth-g4+action-summary+frozen-rgb+gate-0.001+aux-distance-bin-0.05+b1+lr-0.0001+lora-r4+dropout-0.0`
+- Training completed successfully:
+  - Steps: `5000`.
+  - Prefix tokens: `513`.
+  - Depth tokens in prefix: `0`.
+  - Trainable params: about `7.4M`.
+  - First batch main action L1: `0.0791016`.
+  - First batch distance-bin auxiliary loss: `0.98101`.
+  - Aux prediction shape: `(1, 3)`.
+  - Aux label shape: `(1,)`.
+  - Gate trained from about `0.001` to `0.00915527`.
+- Evaluation on task IDs `0,1,2,7,9`, `3` trials each:
+  - Normal depth: `14 / 15` (`93.3%`).
+    - Per task `0,1,2,7,9`: `3/3`, `3/3`, `3/3`, `2/3`, `3/3`.
+    - Log: `experiments/logs/EVAL-libero_spatial-openvla-2026_05_30-19_28_16--action-summary-distance-bin-5k-normal-t01279-3trials.txt`
+  - Null depth: `14 / 15` (`93.3%`).
+    - Per task `0,1,2,7,9`: `3/3`, `3/3`, `3/3`, `2/3`, `3/3`.
+    - Log: `experiments/logs/EVAL-libero_spatial-openvla-2026_05_30-19_35_09--action-summary-distance-bin-5k-null-t01279-3trials.txt`
+  - Shuffled depth tokens: `15 / 15` (`100.0%`).
+    - Per task `0,1,2,7,9`: all `3/3`.
+    - Log: `experiments/logs/EVAL-libero_spatial-openvla-2026_05_30-19_38_30--action-summary-distance-bin-5k-shuffle-t01279-3trials.txt`
+- Interpretation:
+  - The distance-bin auxiliary target improved clean normal score from prior action-summary aux runs (`13/15`) to `14/15` in this small eval.
+  - However, it still does not satisfy the key depth-use criterion:
+    - Normal is tied with null.
+    - Shuffle is higher than normal.
+  - Therefore this target is more geometry-dependent as a supervised label, but the trained policy still does not show closed-loop dependence on the true ordered depth geometry under this 5k frozen-RGB setup.
+- Updated conclusion:
+  - Action-side summary remains the right direction for reducing interference.
+  - Auxiliary targets based on visible geometry bins are better motivated than next-action xyz, but classification of nearest visible geometry distance is still not enough to force useful depth use.
+  - The failure mode may be that the auxiliary head learns geometry while the action residual path can still ignore the summary, or that the visible-nearest-point proxy is not aligned tightly enough with the task target object.
+- Next recommended options:
+  - Add an explicit action-side contrastive/ranking loss: for the same batch, action loss or action residual prediction with normal depth should beat null/shuffle depth by a margin.
+  - Use stronger target supervision from simulator object pose by extending regeneration to save named object/body poses, then train `target_pos - ee_pos` directly.
+  - Couple aux prediction to the action fusion pathway, not only a side head, for example by predicting geometry from the same `delta_h` used for action conditioning.
+  - Increase eval trials before interpreting `14/15` vs `15/15`, but the lack of `normal > null` is already the key blocker.
+
+## 2026-05-30 LIBERO-Plus Setup for Harder Depth Evaluation
+
+- Motivation:
+  - Current LIBERO-Spatial 5-task setting appears too easy for RGB/OpenVLA-OFT; RGB-only reaches `15/15`.
+  - Depth-action-summary variants are less destructive than prefix append, but normal/null/shuffle remain tied or shuffle wins, suggesting the policy still does not need true ordered depth on this data.
+  - User hypothesis: evaluate on harder LIBERO-Plus perturbations where geometry/camera/initial-state changes should make depth more useful.
+- Requested perturbation dimensions:
+  - Objects Layout.
+  - Camera Viewpoints.
+  - Robot Initial States.
+- Cloned / prepared LIBERO-Plus:
+  - Repository path: `/root/autodl-tmp/LIBERO-plus`.
+  - Branch in OpenVLA-OFT remains: `exp/action-summary-aux-v1`.
+- Disk cleanup before download:
+  - Removed old unused run roots:
+    - `runs_depthvla_smoke`
+    - `runs_depthvla_pilot`
+    - `runs_depthvla_stage1`
+    - `runs_depthvla_action_summary_smoke`
+    - `runs_depthvla_action_fusion_smoke`
+    - `runs_depthvla_action_fusion_stage2`
+    - `runs_depthvla_action_residual_smoke`
+    - `runs_depthvla_action_residual_phaseA`
+  - Later removed stale small RGB-D datasets:
+    - `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_2tasks_10demos`
+    - `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_smoke`
+    - `/root/autodl-tmp/LIBERO/libero/datasets/.cache`
+  - Preserved important checkpoints:
+    - Stage 2 strong RGB-only baseline.
+    - Latest action-summary distance-bin run.
+- Installed LIBERO-Plus extra dependencies:
+  - Python:
+    - `wand`
+    - `scikit-image`
+  - System packages:
+    - `libmagickwand-dev`
+    - `libexpat1`
+    - `libfontconfig1-dev`
+    - `libpython3-stdlib`
+    - plus apt-pulled ImageMagick / font / rendering dependencies.
+- Downloaded and installed LIBERO-Plus assets:
+  - Source: Hugging Face dataset repo `Sylvest/LIBERO-plus`, file `assets.zip`.
+  - Download path before extraction:
+    - `/root/autodl-tmp/LIBERO-plus-downloads/assets/assets.zip`
+  - Size: about `6.0G` on disk.
+  - Download time: about `31m40s`.
+  - Integrity check:
+    - `unzip -t`: passed, no compressed-data errors.
+  - Extracted assets to official path:
+    - `/root/autodl-tmp/LIBERO-plus/libero/libero/assets`
+  - Extracted asset size:
+    - about `9.5G`.
+  - Verified asset subdirectories/files:
+    - `new_objects`
+    - `scenes`
+    - `textures`
+    - `articulated_objects`
+    - `stable_hope_objects`
+    - `stable_scanned_objects`
+    - `turbosquid_objects`
+    - `serving_region.xml`
+    - `wall.xml`
+    - `wall_frames.stl`
+  - Removed downloaded `assets.zip` after extraction to recover disk.
+- LIBERO path switch:
+  - Backed up previous config:
+    - `/root/.libero/config.yaml.before_liberoplus_20260530`
+  - Updated active config:
+    - `benchmark_root: /root/autodl-tmp/LIBERO-plus/libero/libero`
+    - `bddl_files: /root/autodl-tmp/LIBERO-plus/libero/libero/bddl_files`
+    - `init_states: /root/autodl-tmp/LIBERO-plus/libero/libero/init_files`
+    - `datasets: /root/autodl-tmp/LIBERO-plus/libero/datasets`
+    - `assets: /root/autodl-tmp/LIBERO-plus/libero/libero/assets`
+  - Updated `depthvla` Python path file:
+    - `/root/miniconda3/envs/depthvla/lib/python3.10/site-packages/libero_source_path.pth`
+    - Content: `/root/autodl-tmp/LIBERO-plus`
+  - Note: to return to original LIBERO, restore the config backup and set the `.pth` file back to `/root/autodl-tmp/LIBERO`.
+- Patched LIBERO-Plus init-state loading for PyTorch 2.6+:
+  - File:
+    - `/root/autodl-tmp/LIBERO-plus/libero/libero/benchmark/__init__.py`
+  - Changed both `torch.load(init_states_path)` calls to:
+    - `torch.load(init_states_path, weights_only=False)`
+  - Reason:
+    - LIBERO init-state files are trusted local numpy-pickled files and fail under PyTorch's newer default `weights_only=True`.
+- Verified LIBERO-Plus benchmark import:
+  - Command used `MUJOCO_GL=egl PYOPENGL_PLATFORM=egl`.
+  - Available benchmarks:
+    - `libero_spatial`
+    - `libero_object`
+    - `libero_goal`
+    - `libero_10`
+    - `libero_90`
+    - `libero_100`
+    - `libero_mix`
+  - `libero_spatial` has `2402` tasks.
+- Important clarification about "downloading the three datasets":
+  - LIBERO-Plus does not provide separate HF files named Objects Layout / Camera Viewpoints / Robot Initial States.
+  - These are benchmark categories in `task_classification.json`, backed by BDDL/init-state definitions in the repo plus the downloaded assets.
+  - Downloadable HF packages discovered:
+    - `Sylvest/LIBERO-plus/assets.zip`: assets, now installed.
+    - `Sylvest/libero_plus_camparam_rlds/libero_plus_camparam_rlds.zip`: about `16.6G`, likely camera-parameter RLDS data; not downloaded yet because only `13G` disk remains.
+    - `Sylvest/libero_plus_rlds/libero_plus_mixdata.*`: total over `70G`, not feasible on current disk.
+    - `Sylvest/libero_plus_data_4suite`: per-suite LeRobot/RLDS zips; LeRobot suite zips are `3.5G-5.0G`, RLDS suite zips are `16G-24G`.
+- LIBERO-Spatial Plus category counts from `task_classification.json`:
+  - Objects Layout: `385` tasks.
+    - Difficulty counts: `{1: 6, 2: 40, 3: 141, 4: 153, 5: 45}`.
+    - First task IDs: `1726,1727,1728,1729,1730`.
+  - Camera Viewpoints: `376` tasks.
+    - Difficulty counts: `{1: 67, 2: 133, 3: 114, 4: 40, 5: 22}`.
+    - First task IDs: `609,610,611,612,613`.
+  - Robot Initial States: `350` tasks.
+    - Difficulty counts: `{1: 90, 2: 69, 3: 75, 4: 46, 5: 70}`.
+    - First task IDs: `259,260,261,262,263`.
+- Verified representative init-state loading after patch:
+  - Robot Initial States sample:
+    - Task index `258`.
+    - Name: `pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_view_0_0_100_0_0_initstate_1`.
+    - Init shape: `(50, 92)`.
+  - Camera Viewpoints sample:
+    - Task index `608`.
+    - Name: `pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_view_0_0_100_2_352_initstate_0`.
+    - Init shape: `(50, 92)`.
+  - Objects Layout sample:
+    - Task index `1725`.
+    - Name: `pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_add_10`.
+    - Init shape: `(1, 118)`.
+- Resource status:
+  - `/root/autodl-tmp` free space: about `13G`.
+  - `/root/autodl-tmp/LIBERO-plus`: about `9.7G`.
+  - `/root/autodl-tmp/LIBERO`: about `11G`.
+  - `/root/autodl-tmp/openvla-oft`: about `3.8G`.
+- Practical next step:
+  - First run eval-only robustness probes on LIBERO-Plus `libero_spatial` category subsets using the existing strong Stage 2 RGB-only checkpoint and action-summary checkpoint.
+  - Start with a small fixed set from Objects Layout / Camera Viewpoints / Robot Initial States, preferably difficulty `4-5`, one trial per task, because LIBERO-Plus README recommends `num_trials_per_task=1`.
+  - Only download larger RLDS/LeRobot training packages if eval shows the perturbations expose a useful gap and disk is expanded or more old data/checkpoints are removed.
+
+## 2026-05-30 LIBERO-Plus Robustness Probe
+
+- Ran eval-only robustness probes on the active LIBERO-Plus `libero_spatial` benchmark.
+- Compared checkpoints:
+  - Stage 2 RGB-only:
+    - `/root/autodl-tmp/openvla-oft/runs_depthvla_stage2/openvla-7b+libero_spatial_rgbd_5tasks_20demos+rgb-only+b1+lr-0.0001+lora-r4+dropout-0.0`
+  - Action-summary distance-bin:
+    - `/root/autodl-tmp/openvla-oft/runs_depthvla_action_summary_v1/openvla-7b+libero_spatial_rgbd_5tasks_20demos+depth-g4+action-summary+frozen-rgb+gate-0.001+aux-distance-bin-0.05+b1+lr-0.0001+lora-r4+dropout-0.0`
+- Fixed 30-task probe:
+  - Objects Layout task IDs:
+    - `1725,1726,1727,1728,1729,1730,1731,1732,1733,1735`
+  - Camera Viewpoints task IDs:
+    - `620,622,623,628,630,632,633,635,637,639`
+  - Robot Initial States task IDs:
+    - `266,267,269,270,273,274,275,278,281,287`
+  - Trials: `1` per task, `30` total episodes per checkpoint.
+- Stage 2 RGB-only result:
+  - Total successes: `17 / 30`.
+  - Overall success rate: `56.7%`.
+  - Category breakdown:
+    - Objects Layout: `10 / 10`.
+    - Camera Viewpoints: `4 / 10`.
+    - Robot Initial States: `3 / 10`.
+  - Log file:
+    - `experiments/logs/EVAL-libero_spatial-openvla-2026_05_30-20_58_52--libero-plus-rgb-objcaminit-diff45-30tasks-1trial.txt`
+- Action-summary distance-bin normal-depth result:
+  - Eval mode:
+    - `depth_integration_mode=depth_action_summary_aux`
+    - `use_depth=True`
+    - `depth_grid_size=4`
+    - `depth_ablation_mode=none`
+  - Log confirmed:
+    - `DepthVLA appends depth tokens to prefix: False`.
+    - Action fusion gate current value: about `0.00915527`.
+  - Total successes: `14 / 30`.
+  - Overall success rate: `46.7%`.
+  - Category breakdown:
+    - Objects Layout: `7 / 10`.
+    - Camera Viewpoints: `3 / 10`.
+    - Robot Initial States: `4 / 10`.
+  - Log file:
+    - `experiments/logs/EVAL-libero_spatial-openvla-2026_05_30-21_04_33--libero-plus-action-summary-distance-bin-normal-objcaminit-diff45-30tasks-1trial.txt`
+- Comparison:
+  - RGB-only beats action-summary overall by `3 / 30`.
+  - Action-summary is worse on Objects Layout (`7/10` vs `10/10`) and Camera Viewpoints (`3/10` vs `4/10`), but slightly better on Robot Initial States (`4/10` vs `3/10`).
+- Interpretation:
+  - LIBERO-Plus is useful: it exposes failures hidden by clean trained-task eval, especially camera viewpoint and robot-initial-state perturbations.
+  - Current action-summary depth branch still does not show a robust advantage over the strong RGB-only baseline.
+  - The small improvement on Robot Initial States is interesting but too small under `1` trial per task to claim a depth effect.
+  - Next useful probe is to run action-summary `null` and `shuffle_tokens` ablations on the same 30-task set, especially to check whether the `4/10` Robot Initial States result depends on real geometry.
+
+### Action-Summary Ablation Verification and Eval
+
+- Checked eval-time ablation implementation before running ablations.
+- Code path verified:
+  - Eval config sets `depth_encoder.ablation_mode` in `experiments/robot/libero/run_libero_eval.py`.
+  - `depth_action_summary_aux` uses `depth_encoder.forward_summary()`, not prefix append.
+  - `forward_summary()` computes geometry features, applies geometry normalization if configured, then applies `_apply_ablation()`, encodes per-cell features, mean-pools per view, concatenates view summaries, and projects to one compact action-side summary.
+- Numerical sanity check on one RGB-D HDF5 sample from the Stage 2 dataset:
+  - `null`:
+    - Pre-MLP geometry feature `absmax=0.0`.
+    - Summary shape remains `(1, 4096)`.
+    - `none_vs_null_summary_l2=0.05427979`.
+  - `shuffle_tokens`:
+    - Shape unchanged.
+    - Sorted feature multiset matches normal features, so values are preserved and only token/cell order changes.
+    - `none_vs_shuffle_summary_l2=0.00984071`.
+  - Conclusion: `null` and `shuffle_tokens` ablations are implemented with the intended semantics for action-summary eval.
+- Action-summary normal-depth reference from the same 30-task LIBERO-Plus probe:
+  - Total: `14 / 30` (`46.7%`).
+  - Objects Layout: `7 / 10`.
+  - Camera Viewpoints: `3 / 10`.
+  - Robot Initial States: `4 / 10`.
+- Action-summary `null` result:
+  - Command used `depth_ablation_mode=null`.
+  - Total: `14 / 30` (`46.7%`).
+  - Objects Layout: `7 / 10`.
+  - Camera Viewpoints: `3 / 10`.
+  - Robot Initial States: `4 / 10`.
+  - Log file:
+    - `experiments/logs/EVAL-libero_spatial-openvla-2026_05_30-21_16_05--libero-plus-action-summary-distance-bin-null-objcaminit-diff45-30tasks-1trial.txt`
+- Action-summary `shuffle_tokens` result:
+  - Command used `depth_ablation_mode=shuffle_tokens`.
+  - Total: `11 / 30` (`36.7%`).
+  - Objects Layout: `5 / 10`.
+  - Camera Viewpoints: `2 / 10`.
+  - Robot Initial States: `4 / 10`.
+  - Log file:
+    - `experiments/logs/EVAL-libero_spatial-openvla-2026_05_30-21_22_20--libero-plus-action-summary-distance-bin-shuffle-objcaminit-diff45-30tasks-1trial.txt`
+- Updated comparison table:
+  - Stage 2 RGB-only: `17 / 30` (`56.7%`).
+  - Action-summary normal: `14 / 30` (`46.7%`).
+  - Action-summary null: `14 / 30` (`46.7%`).
+  - Action-summary shuffle: `11 / 30` (`36.7%`).
+- Interpretation:
+  - `normal == null` is strong evidence that the current action-summary checkpoint still is not extracting useful metric geometry content.
+  - `shuffle < normal/null` shows the model is sensitive to the learned summary pathway/order-induced representation, but not in a way that depends positively on real geometry values.
+  - The Robot Initial States result remains `4/10` for normal, null, and shuffle, so the earlier small advantage over RGB-only on that category is not evidence of depth use.
+  - Current failure mode remains: action-side summary is less destructive than prefix append on clean tasks, but the depth branch is still mostly a learned nuisance/prior pathway rather than a reliable geometry-conditioning pathway.
+
+
+## 2026-05-30 Robot-Centric Permutation-Invariant Summary Encoder v2
+
+- Evaluated the proposed representation change after the LIBERO-Plus action-summary ablations.
+- Motivation:
+  - Current action-summary normal and null both scored `14 / 30`, while shuffle scored `11 / 30`.
+  - This indicates the branch is sensitive to representation/order, but real metric geometry values are not yet useful.
+  - A robot-centric, permutation-invariant summary is a reasonable next representation target because it removes arbitrary cell-order dependence and expresses geometry relative to the end effector.
+- Implemented a minimal v2 representation behind config flags:
+  - `--summary_repr base_xyz` keeps the old action-summary representation.
+  - `--summary_repr ee_relative_set_v2` enables the new path.
+  - `--summary_pool meanmax` is the current v2 pooling mode.
+- New v2 feature construction:
+  - Starts from the existing metric depth + K + camera-to-base T pipeline.
+  - Uses existing coarse grid/cell pooling.
+  - Converts each cell from absolute base-frame geometry to robot-centric features:
+    - `dx = X_base - ee_x`
+    - `dy = Y_base - ee_y`
+    - `dz = Z_base - ee_z`
+    - `r = sqrt(dx^2 + dy^2 + dz^2)`
+    - `z_camera`
+    - `valid`
+    - `u_norm`
+    - `v_norm`
+    - `view_id`
+  - New per-cell feature dimension: `9`.
+- New v2 encoder:
+  - Per-cell independent MLP.
+  - Order-invariant mean pooling and max pooling over all cells/views.
+  - Concatenated mean/max pooled vectors go through a small MLP to produce the final `[B, D]` action-side summary embedding.
+  - This is Deep Sets / PointNet-style and is intentionally not a transformer.
+- Action-side integration:
+  - Existing `depth_action_summary_aux` action-side residual/gated fusion path is reused.
+  - RGB prefix path is unchanged.
+  - Prefix append path is unchanged.
+  - Existing `base_xyz` action-summary checkpoints remain compatible when evaluated with `--summary_repr base_xyz`.
+- Raw EE pose plumbing:
+  - Training dataset now emits `depth_ee_pos` from HDF5 `ee_pos` if present, otherwise `ee_states[:, :3]`.
+  - Eval path passes raw `obs["state"][:3]` before proprio normalization as `depth_ee_pos`.
+  - v2 explicitly raises an error if `ee_pos` is missing, rather than silently falling back to absolute geometry.
+- Files changed:
+  - `prismatic/models/depth_encoder.py`
+  - `vla-scripts/finetune_depthvla.py`
+  - `prismatic/extern/hf/modeling_prismatic.py`
+  - `experiments/robot/openvla_utils.py`
+  - `experiments/robot/libero/run_libero_eval.py`
+  - `PROGRESS.md`
+- Diagnostics added:
+  - First training batch prints `summary_repr`, `summary_pool`, and summary feature dimension.
+  - For `ee_relative_set_v2`, first training batch also prints normal/null/shuffle summary norms and normal-null / normal-shuffle L2 distances.
+- Verification:
+  - `py_compile` passed for all changed Python files.
+  - Synthetic v2 forward sanity check passed:
+    - `normal_shape=(2, 64)`
+    - `summary_feature_dim=9`
+    - `normal_null_l2=0.03433881`, so real geometry changes the summary.
+    - `normal_shuffle_l2=1.6e-08`, so token/cell shuffling is effectively invariant.
+- Current implementation risk:
+  - EE pose source must be consistent between regenerated HDF5 training and LIBERO eval. Training uses raw HDF5 `ee_states[:, :3]`; eval uses raw `robot0_eef_pos` packed into `obs["state"][:3]`, which should match the LIBERO proprio convention already used in this repo.
+  - Geometry normalization for v2 is intentionally not applied to the relative 9D set features in this minimal version; default should stay `geometry_norm=none` for first v2 runs.
+- Recommended first experiment:
+  - Train `depth_action_summary_aux` with `--summary_repr ee_relative_set_v2 --summary_pool meanmax`, keeping the previous Stage 2 dataset, 20k steps, LoRA-r4, batch size 1, `aux_target=distance_bin`, `aux_weight=0.05`, and `geometry_norm=none`.
+  - Eval normal/null/shuffle on the same LIBERO-Plus 30-task probe.
+  - Desired sign: normal should separate from null, and shuffle should be approximately identical to normal at representation level but may differ only through any remaining non-invariant downstream effects; under this v2 encoder, representation-level shuffle sensitivity should be removed.
+
+## 2026-05-31 Spatial v2 Action-Summary Training
+
+- Ran the first full Spatial-only training job for the new robot-centric permutation-invariant summary encoder v2.
+- Dataset:
+  - `/root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_5tasks_20demos`
+  - Same Stage 2 Spatial RGB-D dataset used by previous RGB-only / prefix-append comparisons.
+- Training configuration:
+  - `depth_integration_mode=depth_action_summary_aux`
+  - `use_depth=True`
+  - `depth_grid_size=4`
+  - `depth_hidden_dim=256`
+  - `summary_repr=ee_relative_set_v2`
+  - `summary_pool=meanmax`
+  - `geometry_norm=none`
+  - `batch_size=1`
+  - `max_steps=20000`
+  - `save_freq=5000`
+  - `save_latest_checkpoint_only=True`
+  - `merge_lora_during_training=False`
+  - `lora_rank=4`
+  - `learning_rate=1e-4`
+  - `depth_action_fusion_gate_init=0.001`
+  - `aux_target=distance_bin`
+  - `aux_output_dim=3`
+  - `depth_aux_spatial_loss_weight=0.05`
+  - `use_wandb=False`
+- First-batch / run diagnostics:
+  - RGB prefix tokens remained `513`.
+  - Depth tokens included in prefix: `0`.
+  - This confirms v2 does not append depth tokens to the OpenVLA RGB prefix.
+  - Trainable parameter summary:
+    - LoRA: `13,853,536`
+    - Proprio projector: `16,818,176`
+    - Action head: `154,285,323`
+    - Depth encoder: `5,301,249`
+    - Total trainable: `190,258,284`
+  - Summary diagnostic:
+    - `normal-null` summary L2 was about `0.622`, so real geometry changes the summary.
+    - `normal-shuffle` summary L2 was `0`, confirming shuffle invariance for the v2 representation path.
+- Training completed successfully:
+  - Final step: `20000 / 20000`.
+  - Runtime: about `2:00:09`.
+  - Final speed near completion: about `2.7-2.8 steps/s`.
+  - The final NCCL `destroy_process_group()` warning appeared at process exit; checkpoint saving was already complete.
+- Checkpoint directory:
+  - `/root/autodl-tmp/openvla-oft/runs_depthvla_action_summary_v2/47a0ec7fc4ec123775a391911046cf33cf9ed83f+libero_spatial_rgbd_5tasks_20demos+depth-g4+action-summary-aux+repr-ee_relative_set_v2+gate-0.001+aux-distance_bin-0.05+b1+lr-0.0001+lora-r4+dropout-0.0`
+- Verified checkpoint artifacts:
+  - `lora_adapter/`
+  - `action_head--latest_checkpoint.pt`
+  - `proprio_projector--latest_checkpoint.pt`
+  - `depth_encoder--latest_checkpoint.pt`
+  - `dataset_statistics.json`
+  - `depthvla_config.json`
+- Resource status after training:
+  - GPU: `0 MiB / 97887 MiB`, utilization `0%`.
+  - Disk: `/root/autodl-tmp` had about `11G` free.
+- Next action:
+  - Run matched eval for this checkpoint.
+  - First evaluate Spatial trained tasks `0,1,2,7,9` with `3` trials per task.
+  - Then run `normal`, `null`, and `shuffle_tokens` ablations.
+  - Key desired sign: `normal > null`; v2 should also make `shuffle_tokens` approximately match `normal` at the representation level.
+
+## 2026-06-03 Spatial v2 Action-Summary Eval
+
+- Evaluated the robot-centric permutation-invariant summary encoder v2 checkpoint:
+  - `/root/autodl-tmp/openvla-oft/runs_depthvla_action_summary_v2/47a0ec7fc4ec123775a391911046cf33cf9ed83f+libero_spatial_rgbd_5tasks_20demos+depth-g4+action-summary-aux+repr-ee_relative_set_v2+gate-0.001+aux-distance_bin-0.05+b1+lr-0.0001+lora-r4+dropout-0.0`
+- Eval-time loading/config checks:
+  - `depth_integration_mode=depth_action_summary_aux`
+  - `summary_repr=ee_relative_set_v2`
+  - `summary_pool=meanmax`
+  - `DepthVLA appends depth tokens to prefix: False`
+  - Action fusion gate current value: about `0.000667572`
+- Note about active benchmark path:
+  - The active LIBERO config currently points at `/root/autodl-tmp/LIBERO-plus`, so `libero_spatial` evals are on LIBERO-Plus tasks, not the original local LIBERO-Spatial benchmark.
+
+### LIBERO-Plus Task IDs 0,1,2,7,9 Smoke
+
+- Ran a quick 5-task / 3-trial eval with normal depth.
+- Result:
+  - Total successes: `4 / 15`
+  - Overall success rate: `26.7%`
+- Per-task observed success counts:
+  - Task `0`: `1 / 3`
+  - Task `1`: `0 / 3`
+  - Task `2`: `1 / 3`
+  - Task `7`: `1 / 3`
+  - Task `9`: `1 / 3`
+- Log file:
+  - `experiments/logs/EVAL-libero_spatial-openvla-2026_06_03-22_34_43--action-summary-v2-ee-relative-normal-t01279-3trials.txt`
+- Interpretation:
+  - This was useful as a path check, but it is not directly comparable to the earlier original-LIBERO clean trained-task eval because the active benchmark is LIBERO-Plus.
+
+### LIBERO-Plus 30-Task Robustness Probe
+
+- Ran the same fixed 30-task LIBERO-Plus probe used previously:
+  - Objects Layout task IDs:
+    - `1725,1726,1727,1728,1729,1730,1731,1732,1733,1735`
+  - Camera Viewpoints task IDs:
+    - `620,622,623,628,630,632,633,635,637,639`
+  - Robot Initial States task IDs:
+    - `266,267,269,270,273,274,275,278,281,287`
+  - Trials: `1` per task.
+- Normal depth result:
+  - Total successes: `9 / 30`
+  - Overall success rate: `30.0%`
+  - Category breakdown: Objects Layout `5 / 10`, Camera Viewpoints `3 / 10`, Robot Initial States `1 / 10`
+  - Log: `experiments/logs/EVAL-libero_spatial-openvla-2026_06_03-22_37_34--libero-plus-action-summary-v2-ee-relative-normal-objcaminit-diff45-30tasks-1trial.txt`
+- Null-depth result:
+  - Total successes: `9 / 30`
+  - Overall success rate: `30.0%`
+  - Category breakdown: Objects Layout `5 / 10`, Camera Viewpoints `3 / 10`, Robot Initial States `1 / 10`
+  - Log: `experiments/logs/EVAL-libero_spatial-openvla-2026_06_03-22_42_58--libero-plus-action-summary-v2-ee-relative-null-objcaminit-diff45-30tasks-1trial.txt`
+- Shuffled-depth result:
+  - Total successes: `9 / 30`
+  - Overall success rate: `30.0%`
+  - Category breakdown: Objects Layout `5 / 10`, Camera Viewpoints `3 / 10`, Robot Initial States `1 / 10`
+  - Log: `experiments/logs/EVAL-libero_spatial-openvla-2026_06_03-22_48_14--libero-plus-action-summary-v2-ee-relative-shuffle-objcaminit-diff45-30tasks-1trial.txt`
+- Comparison against earlier rows on the same 30-task LIBERO-Plus probe:
+  - Stage 2 RGB-only: `17 / 30` (`56.7%`)
+  - Action-summary distance-bin v1 normal: `14 / 30` (`46.7%`)
+  - Action-summary distance-bin v1 null: `14 / 30` (`46.7%`)
+  - Action-summary distance-bin v1 shuffle: `11 / 30` (`36.7%`)
+  - Action-summary v2 `ee_relative_set_v2` normal/null/shuffle: all `9 / 30` (`30.0%`)
+- Interpretation:
+  - The v2 representation achieved the expected shuffle invariance at rollout level: normal, null, and shuffle produced identical aggregate and category results.
+  - However, it did not produce the desired depth-use signal; normal depth is not better than null depth.
+  - The v2 checkpoint also underperforms both the earlier v1 action-summary checkpoint and the RGB-only baseline on this fixed LIBERO-Plus probe.
+  - Current read: the robot-centric set representation removed order sensitivity, but this training recipe/gate/aux objective still does not make real metric geometry useful for closed-loop robustness.
+
+## 2026-06-03 Direction After v2 Eval
+
+- Decision:
+  - Stop pursuing the current `ee_relative_set_v2` representation as the main line for now.
+  - Return to the previous action-summary method:
+    - `depth_integration_mode=depth_action_summary_aux`
+    - `summary_repr=base_xyz`
+    - `aux_target=distance_bin`
+    - `depth_aux_spatial_loss_weight=0.05`
+    - `geometry_norm=none`
+- Reason:
+  - The v2 checkpoint scored `9 / 30` on the fixed LIBERO-Plus robustness probe, below both the v1 action-summary checkpoint (`14 / 30`) and RGB-only (`17 / 30`).
+  - v2 normal/null/shuffle all tied, so it did not solve the key depth-use criterion.
+  - The old v1 action-summary path is still the stronger depth-side baseline among the tested DepthVLA variants.
+- Practical note:
+  - Code entrypoints have been restored to the v1 action-summary configuration.
+  - Use `--summary_repr base_xyz` or omit `--summary_repr`, since `base_xyz` is the default.
+  - Training/eval now reject `--summary_repr ee_relative_set_v2` for the active `depth_action_summary_aux` path, preventing accidental v2 reruns.
+  - The old v2 implementation remains in the repository only as an ablation record / compatibility path; it is no longer the active experiment configuration.
+  - The current v1 checkpoint to treat as the stronger old-method reference is:
+    - `/root/autodl-tmp/openvla-oft/runs_depthvla_action_summary_v1/openvla-7b+libero_spatial_rgbd_5tasks_20demos+depth-g4+action-summary+frozen-rgb+gate-0.001+aux-distance-bin-0.05+b1+lr-0.0001+lora-r4+dropout-0.0`
+
+## 2026-06-03 Action-Summary v1 Phase B Plan
+
+- New decision:
+  - Keep the v1 action-summary representation (`summary_repr=base_xyz`) but change the training recipe.
+  - Treat the strong Stage 2 RGB-only checkpoint as the behavioral anchor.
+  - Freeze the RGB-only components and train only the depth-side adapter path.
+- Rationale:
+  - RGB-only already has the strongest robustness result so far on the fixed LIBERO-Plus probe (`17 / 30`).
+  - Prior depth variants often damaged this policy or failed to separate normal/null/shuffle depth.
+  - The safest next test is to start from exactly RGB-only behavior and let depth learn a small correction.
+- Phase B recipe:
+  - Base model: local cached OpenVLA snapshot.
+  - `resume_components_from`: Stage 2 RGB-only checkpoint.
+  - `depth_integration_mode=depth_action_summary_aux`
+  - `summary_repr=base_xyz`
+  - `aux_target=distance_bin`
+  - `depth_aux_spatial_loss_weight=0.05`
+  - `depth_action_fusion_gate_init=1.0`
+  - `freeze_vla_lora=True`
+  - `freeze_proprio_projector=True`
+  - `freeze_action_head_base=True`
+  - Trainable: depth encoder, action-summary depth adapter/gate, and spatial auxiliary head.
+  - Steps: `5000` for first diagnostic run.
+- Important initialization property:
+  - The action-summary adapter final layer is zero-initialized, so even with gate `1.0`, initial action-side correction is exactly zero.
+  - This preserves RGB-only behavior at initialization while avoiding tiny-gate gradient suppression.
+
+## 2026-06-03 Action-Summary v1 Phase B Result
+
+- Training completed:
+  - Checkpoint:
+    - `/root/autodl-tmp/openvla-oft/runs_depthvla_action_summary_phaseB/action-summary-v1-phaseB-frozen-rgb-gate1-aux-distance-bin-5k`
+  - Resume source:
+    - `/root/autodl-tmp/openvla-oft/runs_depthvla_stage2/openvla-7b+libero_spatial_rgbd_5tasks_20demos+rgb-only+b1+lr-0.0001+lora-r4+dropout-0.0`
+  - Trainable parameters: `7,405,317`
+  - Frozen components:
+    - VLA LoRA: frozen
+    - Proprio projector: frozen
+    - Base action head: frozen
+  - Trainable components:
+    - Depth encoder
+    - Action-summary depth adapter / fusion gate
+    - Spatial auxiliary head
+  - First-batch diagnostics:
+    - `summary_repr=base_xyz`
+    - `depth_context` shape: `(1, 4096)`
+    - action hidden shape: `(1, 56, 4096)`
+    - action fusion gate: `1.0`
+    - main action L1: `0.134766`
+    - aux target: `distance_bin`
+    - aux loss: `1.12704`
+    - aux weight: `0.05`
+  - Saved artifacts verified:
+    - `lora_adapter/`
+    - `action_head--latest_checkpoint.pt`
+    - `proprio_projector--latest_checkpoint.pt`
+    - `depth_encoder--latest_checkpoint.pt`
+    - `dataset_statistics.json`
+    - `depthvla_config.json`
+
+- Fixed LIBERO-Plus 30-task probe:
+  - Same task IDs as previous robustness probes:
+    - Objects Layout: `1725,1726,1727,1728,1729,1730,1731,1732,1733,1735`
+    - Camera Viewpoints: `620,622,623,628,630,632,633,635,637,639`
+    - Robot Initial States: `266,267,269,270,273,274,275,278,281,287`
+  - Trials: `1` per task.
+- Normal depth result:
+  - Total successes: `13 / 30`
+  - Overall success rate: `43.3%`
+  - Log: `experiments/logs/EVAL-libero_spatial-openvla-2026_06_03-23_22_21--phaseB-v1-frozen-rgb-gate1-normal-objcaminit-diff45-30tasks-1trial.txt`
+- Null-depth result:
+  - Total successes: `12 / 30`
+  - Overall success rate: `40.0%`
+  - Log: `experiments/logs/EVAL-libero_spatial-openvla-2026_06_03-23_27_17--phaseB-v1-frozen-rgb-gate1-null-objcaminit-diff45-30tasks-1trial.txt`
+- Shuffled-depth result:
+  - Total successes: `14 / 30`
+  - Overall success rate: `46.7%`
+  - Log: `experiments/logs/EVAL-libero_spatial-openvla-2026_06_03-23_32_14--phaseB-v1-frozen-rgb-gate1-shuffle-objcaminit-diff45-30tasks-1trial.txt`
+
+- Comparison against earlier rows on the same 30-task LIBERO-Plus probe:
+  - Stage 2 RGB-only: `17 / 30` (`56.7%`)
+  - Previous v1 action-summary distance-bin: normal `14 / 30`, null `14 / 30`, shuffle `11 / 30`
+  - v2 `ee_relative_set_v2`: normal/null/shuffle all `9 / 30`
+  - Phase B frozen-RGB depth-adapter: normal `13 / 30`, null `12 / 30`, shuffle `14 / 30`
+- Interpretation:
+  - Freezing the RGB-only backbone and training only the depth-side adapter avoided the severe v2 collapse, but it did not beat the RGB-only anchor.
+  - The normal-depth result is only one task above null-depth and one task below shuffled-depth, so this run still does not show a reliable positive depth-use signal.
+  - The result suggests the main issue is not just RGB-policy drift. Even with the RGB policy frozen and a zero-initialized residual path, the current action-summary depth objective can learn a perturbation, but not one that depends beneficially on correct metric depth.
+  - Current read: keep this as a useful negative control, but do not scale this exact Phase B recipe without changing the supervision / routing signal.
+
+## 2026-06-03 Plan: Make Depth Causal and Improve Eval Score
+
+- Goal:
+  - Make the policy learn to read metric depth as a task-relevant signal, not just as an action-head perturbation.
+  - Beat the current Stage 2 RGB-only anchor on the fixed LIBERO-Plus 30-task probe:
+    - Current RGB-only anchor: `17 / 30`
+    - Minimum useful milestone: normal depth `>17 / 30`
+    - Depth-use gate: normal depth must exceed both null-depth and shuffled-depth by at least `3 / 30` on the same probe before scaling training.
+
+- Current evidence:
+  - The existing 5-task RGB-D HDF5 data is not empty or constant:
+    - Both `agentview_depth_m` and `eye_in_hand_depth_m` exist.
+    - Both views include camera intrinsics `K` and camera-to-base transforms.
+    - Sampled valid-depth ratio is effectively `1.0`.
+    - `agentview` metric range is roughly `0.6m-3.1m`.
+    - `eye_in_hand` metric range is roughly `0.04m-0.4m` for most samples, with some farther values.
+  - However, the dataset is only `5 tasks x 20 demos`, and the evaluation target is LIBERO-Plus object/camera/initstate variation.
+  - Local LIBERO-Plus currently provides benchmark/task definitions; RGB-D demonstration HDF5s for the 30-task probe are not present yet.
+  - Current aux labels are weak:
+    - `distance_bin` and `relative_xyz` are based on nearest visible workspace geometry to the end-effector, not explicitly bowl/plate/target geometry.
+  - Current action-summary fusion is global:
+    - `base_xyz` pools depth over grid/view and projects one summary vector.
+    - The action head then mean-pools depth context and cannot ask object-conditioned questions like "where is the bowl relative to the gripper?"
+
+- Phase 0: Depth Signal Probe Before More Large Runs
+  - Purpose:
+    - Separate "depth data lacks useful signal" from "fusion/supervision fails to use the signal."
+  - Build a small offline probe dataset from existing RGB-D HDF5:
+    - Inputs:
+      - coarse depth geometry features from both cameras
+      - end-effector position
+      - optional language/task id
+    - Labels:
+      - next action xyz delta
+      - visible nearest-object/contact vector
+      - gripper-to-contact distance
+      - phase label: reach / grasp / transport / place, if recoverable from gripper/action/state traces
+  - Required corruption tests:
+    - normal depth
+    - null depth
+    - shuffled depth tokens
+  - Pass condition:
+    - A small probe must perform clearly better with normal depth than null/shuffle on at least one task-relevant geometric label.
+  - If this fails:
+    - Treat the current depth/label pipeline as insufficient and fix data/labels before model training.
+  - If this passes:
+    - Proceed to object-conditioned labels and fusion.
+
+- Phase 1: Expand RGB-D Data to LIBERO-Plus Variations
+  - Priority:
+    - Generate or collect RGB-D demos for the same variation families used in eval:
+      - object layout variations
+      - camera viewpoint variations
+      - robot initial-state variations
+  - Minimum first dataset:
+    - Use the same 30-task probe IDs as the current eval set.
+    - Start with `20 demos/task` if feasible.
+    - Store the same fields as the current RGB-D HDF5s:
+      - `agentview_rgb`, `eye_in_hand_rgb`
+      - `agentview_depth_m`, `eye_in_hand_depth_m`
+      - `agentview_K`, `eye_in_hand_K`
+      - `agentview_T_camera_to_base`, `eye_in_hand_T_camera_to_base`
+      - `ee_pos`, `ee_ori`, `gripper_states`, `joint_states`, `actions`, simulator `states`
+  - Better dataset target:
+    - `30-50 demos/task` for the most failure-prone camera and initstate categories.
+    - Add texture/light/random distractor changes where possible to reduce the RGB shortcut.
+  - Sanity gates:
+    - depth valid ratio
+    - per-view depth histogram
+    - point-cloud workspace coverage
+    - camera extrinsic consistency
+    - replay success rate for generated demos
+    - depth normal/null/shuffle probe gap before large VLA training
+
+- Phase 2: Replace Weak Distance-Bin Aux With Task-Relevant 3D Aux
+  - New auxiliary targets to implement:
+    - `ee_to_object_xyz`
+      - vector from end-effector to the manipulated object center, in robot/base frame.
+    - `object_to_target_xyz`
+      - vector from manipulated object center to target receptacle/placement region, in base frame.
+    - `gripper_to_contact_distance`
+      - scalar distance from gripper/end-effector to the contact object or nearest object point.
+    - Optional:
+      - `ee_to_target_xyz`
+      - `object_height_or_support_z`
+      - `phase_label`
+  - Preferred supervision source:
+    - Simulator states / object states if LIBERO exposes object poses reliably.
+  - Fallback supervision source:
+    - Use lifted depth point cloud plus workspace/object heuristics, but only as weak labels.
+  - Loss design:
+    - Regression losses for xyz vectors: Smooth L1 / Huber.
+    - Distance scalar: Smooth L1.
+    - Phase label: cross entropy.
+    - Keep action BC loss primary, but make aux weight high enough to force geometric representation learning during warmup.
+  - Training schedule:
+    - Warm up depth encoder + aux heads on 3D aux only.
+    - Then freeze RGB-only policy and train depth adapter with action BC + 3D aux.
+    - Only after normal/null/shuffle separation appears, allow limited unfreezing of action head or LoRA.
+
+- Phase 3: Move From Global Summary to Object-/Language-Conditioned Depth Tokens
+  - Current issue:
+    - A single global `base_xyz` summary is too coarse and can ignore object identity.
+  - Proposed fusion:
+    - Lift depth into per-cell metric geometry tokens.
+    - Attach view id and optionally RGB patch features to each depth token.
+    - Add a small query module that produces task/object-conditioned queries from language/action hidden states:
+      - object query: "bowl"
+      - target query: "plate"
+      - gripper/contact query
+    - Cross-attend those queries over depth tokens.
+    - Feed the resulting object-conditioned vectors to the action head:
+      - `ee_to_object_context`
+      - `object_to_target_context`
+      - `contact_context`
+  - Keep zero-impact initialization:
+    - Any depth-to-action residual should remain zero-initialized.
+    - Start with frozen RGB-only backbone.
+  - Required diagnostic:
+    - Log attention or selected depth-token locations.
+    - Verify object/target queries attend to plausible regions on rollouts.
+
+- Phase 4: Evaluation Protocol and Go/No-Go Gates
+  - Always evaluate:
+    - normal depth
+    - null depth
+    - shuffled depth
+    - RGB-only anchor
+  - First quick gate:
+    - fixed LIBERO-Plus 30-task probe, `1 trial/task`
+  - Stronger gate:
+    - same 30 tasks, `3-5 trials/task`
+  - Success criteria:
+    - normal depth beats RGB-only.
+    - normal depth beats null and shuffle.
+    - gains appear in camera and initstate categories, not only in easy object-layout tasks.
+  - Failure interpretation:
+    - normal ~= null:
+      - depth path is not used; strengthen aux and/or depth dropout.
+    - shuffle >= normal:
+      - model learned non-causal perturbation; add object-conditioned supervision and corruption training.
+    - normal > null/shuffle but below RGB-only:
+      - depth is useful but policy integration hurts; keep RGB frozen and reduce residual/gate capacity.
+
+- Immediate next concrete steps:
+  - Implement a small depth-probe script for the existing RGB-D HDF5 data.
+  - Audit whether LIBERO-Plus can generate RGB-D demonstrations with the same observation fields as the existing dataset.
+  - Add new aux target names and label plumbing:
+    - `ee_to_object_xyz`
+    - `object_to_target_xyz`
+    - `gripper_to_contact_distance`
+  - Prototype object-conditioned depth-token fusion behind a new mode, leaving current v1 code path intact.
+
+## 2026-06-03 Depth Signal Probe
+
+- Implemented:
+  - `vla-scripts/depth_signal_probe.py`
+- Purpose:
+  - Test whether the existing RGB-D HDF5 depth contains learnable task-relevant signal without loading the 7B VLA.
+  - Train a small MLP on coarse metric-depth geometry features and compare evaluation under:
+    - normal depth
+    - null depth
+    - shuffled depth tokens
+- Inputs:
+  - Coarse 4x4 geometry features from `agentview_depth_m` and `eye_in_hand_depth_m`.
+  - Camera intrinsics/extrinsics are used to lift depth into base-frame XYZ.
+  - End-effector position and gripper state are included as non-depth context.
+- Probe targets:
+  - `contact_xyz`: proxy vector from end-effector to nearest visible workspace/contact point.
+  - `contact_distance`: norm of the same proxy contact vector.
+  - `action_xyz`: first three dimensions of the next action.
+- Commands:
+  - Contact XYZ:
+    - `/root/miniconda3/envs/depthvla/bin/python vla-scripts/depth_signal_probe.py --rgbd_data_dir /root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_5tasks_20demos --target contact_xyz --max_samples 1200 --stride 2 --epochs 20 --output_json experiments/logs/depth_signal_probe_contact_xyz_1200.json`
+  - Contact distance:
+    - `/root/miniconda3/envs/depthvla/bin/python vla-scripts/depth_signal_probe.py --rgbd_data_dir /root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_5tasks_20demos --target contact_distance --max_samples 1200 --stride 3 --epochs 15 --batch_size 128 --output_json runs_depthvla_stage2/depth_probe_contact_distance_quick.json`
+  - Action XYZ:
+    - `/root/miniconda3/envs/depthvla/bin/python vla-scripts/depth_signal_probe.py --rgbd_data_dir /root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_rgbd_5tasks_20demos --target action_xyz --max_samples 600 --stride 4 --epochs 10 --batch_size 128 --output_json runs_depthvla_stage2/depth_probe_action_xyz_quick.json`
+- Results:
+  - `contact_xyz`, 1200 samples:
+    - normal RMSE: `0.0187`, MAE: `0.0121`
+    - null RMSE: `0.0311`, MAE: `0.0233`
+    - shuffle RMSE: `0.0314`, MAE: `0.0236`
+    - mean baseline RMSE: `0.0301`, MAE: `0.0228`
+  - `contact_distance`, 1200 samples:
+    - normal RMSE: `0.0079`, MAE: `0.0061`
+    - null RMSE: `0.0254`, MAE: `0.0220`
+    - shuffle RMSE: `0.0264`, MAE: `0.0224`
+    - mean baseline RMSE: `0.0254`, MAE: `0.0220`
+  - `action_xyz`, 600 samples:
+    - normal RMSE: `0.2769`, MAE: `0.1782`
+    - null RMSE: `0.4657`, MAE: `0.3652`
+    - shuffle RMSE: `0.4798`, MAE: `0.3716`
+    - mean baseline RMSE: `0.4559`, MAE: `0.3579`
+- Interpretation:
+  - The existing RGB-D depth is not meaningless; a small MLP can use normal depth to predict contact geometry and action components substantially better than null or shuffled depth.
+  - This supports the hypothesis that rollout failures come from VLA supervision/fusion not making depth causal, rather than the raw depth data being useless.
+  - Next priority should be adding object/target-specific 3D auxiliary labels and object-conditioned depth-token fusion, while separately expanding RGB-D data to LIBERO-Plus variations.
+
+## 2026-06-04 3D Auxiliary Plumbing Step 1
+
+- Implemented in `vla-scripts/finetune_depthvla.py`:
+  - Added new aux target names:
+    - `contact_xyz`
+    - `ee_to_object_xyz`
+    - `gripper_to_contact_distance`
+    - `object_to_target_xyz`
+  - `contact_xyz`:
+    - 3D regression target.
+    - Uses the existing visible workspace/contact proxy from agentview depth.
+  - `ee_to_object_xyz`:
+    - Currently an alias for the same visible contact/object proxy.
+    - This is intentionally a proxy until regenerated RGB-D HDF5s save symbolic manipulated-object pose.
+  - `gripper_to_contact_distance`:
+    - 1D regression target.
+    - Computes the norm of the visible contact proxy vector.
+    - Requires `--aux_output_dim 1`.
+  - `object_to_target_xyz`:
+    - Registered as an explicit target name, but raises a clear `KeyError` on current HDF5s because object/target pose fields are not saved.
+    - This should be enabled after LIBERO-Plus RGB-D regeneration saves symbolic object and target poses.
+- Loss behavior:
+  - `contact_xyz`, `ee_to_object_xyz`, and `gripper_to_contact_distance` use Smooth L1 regression.
+  - Regression aux targets now validate `spatial_pred.shape[-1] == aux_label.shape[-1]`.
+  - This prevents silent broadcasting if `--aux_output_dim` is wrong.
+- Verification:
+  - `py_compile` passed:
+    - `/root/miniconda3/envs/depthvla/bin/python -m py_compile vla-scripts/finetune_depthvla.py vla-scripts/depth_signal_probe.py`
+  - Direct label-function check on current RGB-D HDF5:
+    - `contact_xyz`: shape `(3,)`, dtype `float32`
+    - `ee_to_object_xyz`: shape `(3,)`, dtype `float32`
+    - `gripper_to_contact_distance`: shape `(1,)`, dtype `float32`
+    - `distance_bin`: scalar int class, unchanged
+    - `object_to_target_xyz`: raises the intended missing-symbolic-pose error
+- Example next training probe:
+  - Use the Phase B frozen-RGB recipe, but replace `distance_bin` with:
+    - `--aux_target gripper_to_contact_distance`
+    - `--aux_output_dim 1`
+  - Keep:
+    - `--freeze_vla_lora True`
+    - `--freeze_proprio_projector True`
+    - `--freeze_action_head_base True`
+    - `--depth_action_fusion_gate_init 1.0`
+- Remaining gap:
+  - True `ee_to_object_xyz` and `object_to_target_xyz` need new RGB-D data fields from LIBERO regeneration:
+    - manipulated object pose / center
+    - target receptacle or placement-region pose / center
+  - Current HDF5 `states` vector may contain simulator state, but there is no reliable schema in the saved files mapping state indices to object/target identities.
+
+## 2026-06-04 Ablation Stop Decision and Forward Plan
+
+- Phase C evaluation status:
+  - `phaseC-v1-frozen-rgb-gate1-aux-contact-distance-normal-objcaminit-diff45-30tasks-1trial` finished:
+    - total episodes: `30`
+    - total successes: `12`
+    - overall success rate: `0.4000`
+  - The matching null run was interrupted after `11/30` episodes:
+    - successes so far: `10/11`
+    - log file exists, but there are no final results.
+- Decision:
+  - Do not spend more GPU time rerunning null/shuffle for this Phase C checkpoint.
+  - Reason: the normal/RGB-effective baseline itself is weak on the 30-task LIBERO-Plus variation probe, so a completed null/shuffle comparison would not answer the main question.
+  - The useful next signal is not another ablation; it is whether a stronger data + aux + fusion design can make normal depth improve actual rollout success.
+
+- Forward plan from the three requested directions:
+  - Data:
+    - Expand beyond the current `5 tasks x 20 demos` subset into the LIBERO-Plus object/camera/initstate variation set.
+    - Regenerate RGB-D for those variations with the same metric depth, intrinsics, extrinsics, proprio, actions, and language fields.
+    - Add explicit symbolic supervision fields during regeneration rather than relying only on opaque simulator state vectors:
+      - manipulated object name/id
+      - manipulated object pose/center
+      - target receptacle or placement region pose/center
+      - camera/object/initstate variation metadata
+  - Supervision:
+    - Keep current proxy labels only as a temporary weak baseline:
+      - `contact_xyz`
+      - `ee_to_object_xyz` as visible-depth proxy
+      - `gripper_to_contact_distance`
+    - Promote true task-relevant labels once symbolic fields are saved:
+      - true `ee_to_object_xyz`
+      - true `object_to_target_xyz`
+      - true `gripper_to_contact_distance`
+    - Prefer continuous Smooth L1/Huber losses over distance-bin classification for the main geometric signal.
+    - Use bins only as auxiliary diagnostics or coarse phase labels.
+  - Fusion:
+    - Current v1/v2 action-summary path is still too global; it can ignore which object the instruction names.
+    - Next architecture target should be a new language/object-conditioned depth-token path, separate from the old `base_xyz` summary:
+      - build metric per-cell depth tokens with view/cell geometry
+      - derive small language/object queries from instruction/action hidden states
+      - cross-attend object, target, and contact queries over depth tokens
+      - feed resulting object-conditioned vectors into the action head with zero/low-impact initialization
+    - Required diagnostics:
+      - normal vs null/shuffle gap on probe losses before rollout
+      - query attention/selected depth-token locations
+      - normal depth must beat RGB-only and must beat null/shuffle on the same variation probe before scaling trials.
+
+- Immediate next implementation targets:
+  - Update RGB-D regeneration to save symbolic object/target pose fields for LIBERO-Plus variation tasks.
+  - Implement true `object_to_target_xyz` and true `ee_to_object_xyz` label extraction from those fields.
+  - Add a new fusion mode for object-conditioned depth queries while leaving the current v1 `base_xyz` path intact for comparison.
+
+## 2026-06-04 Symbolic 3D Aux Data Fields Step 2
+
+- Implemented in `experiments/robot/libero/regenerate_libero_rgbd_dataset.py`:
+  - Added LIBERO/LIBERO-Plus symbolic metadata helpers:
+    - `parse_variation_metadata(task.name)` extracts language/view/initstate/object variation hints from expanded task names.
+    - `choose_symbolic_supervision_names(env)` uses `obj_of_interest` and BDDL `goal_state` to choose the manipulated object and target object/site.
+    - `get_symbolic_pose(env, name)` reads MuJoCo body/site position and quaternion for objects, fixtures, or target sites.
+    - `build_symbolic_geometry(...)` computes per-step task-relevant 3D labels.
+  - New regenerated HDF5 episode attrs:
+    - `task_name`
+    - `manipulated_object_name`
+    - `target_object_name`
+    - `goal_state_json`
+    - `variation_metadata_json`
+  - New regenerated HDF5 `obs/` datasets:
+    - `manipulated_object_pos`: `(T, 3)`
+    - `manipulated_object_quat`: `(T, 4)`
+    - `target_pos`: `(T, 3)`
+    - `target_quat`: `(T, 4)`
+    - `ee_to_object_xyz`: `(T, 3)`
+    - `object_to_target_xyz`: `(T, 3)`
+    - `gripper_to_contact_distance`: `(T, 1)`
+- Implemented in `vla-scripts/finetune_depthvla.py`:
+  - Dataset loading now reads optional true-symbolic fields when present:
+    - `manipulated_object_pos`
+    - `target_pos`
+    - `ee_to_object_xyz`
+    - `object_to_target_xyz`
+    - `gripper_to_contact_distance`
+  - Aux label priority is now:
+    - use true HDF5 symbolic field if present
+    - otherwise fall back to existing visible-depth proxy for `ee_to_object_xyz` and `gripper_to_contact_distance`
+    - keep `object_to_target_xyz` as a hard error on old HDF5s, because no reliable proxy exists without target pose
+  - Added `object_to_target_xyz` to the Smooth L1 auxiliary loss branch.
+- Verification:
+  - `py_compile` passed for:
+    - `experiments/robot/libero/regenerate_libero_rgbd_dataset.py`
+    - `vla-scripts/finetune_depthvla.py`
+  - Function-level aux probe passed:
+    - `object_to_target_xyz` returned `[1.0, 2.0, 3.0]` from the new HDF5-style field.
+    - `ee_to_object_xyz` returned `[0.1, 0.2, 0.3]` from the new HDF5-style field.
+    - `gripper_to_contact_distance` returned `[0.374]` from the new HDF5-style field.
+  - Fake-env symbolic selection probe passed:
+    - `obj_of_interest=['black_bowl_1']` and goal `['on', 'black_bowl_1', 'plate_1']` selected manipulated object `black_bowl_1` and target `plate_1`.
+    - variation parser extracted `language_variation`, `view`, and `initstate` metadata from a Plus-style task name.
+- Remaining validation gap:
+  - Need run one tiny LIBERO-Plus RGB-D regeneration task with raw demo data present, then inspect the actual HDF5 numeric fields for finite object/target poses.
+  - After that, train a small frozen-RGB action-summary run using true `ee_to_object_xyz`, true `object_to_target_xyz`, and true `gripper_to_contact_distance` separately.
+
+## 2026-06-04 Object-Conditioned Depth Query Fusion Step 1
+
+- Implemented a new action-side depth fusion mode:
+  - CLI / config aliases:
+    - `--depth_integration_mode depth_object_query`
+    - `--depth_fusion_mode object_query`
+  - This keeps RGB/depth prefix behavior separate from the old global summary path.
+- Implemented in `prismatic/models/action_heads.py`:
+  - `L1RegressionActionHead(depth_fusion_type="object_query")`
+  - Uses action-token hidden states as language/action-conditioned query seed.
+  - Adds three learned query slots intended for object / target / contact context.
+  - Cross-attends those queries over per-cell depth tokens `(B, V*G*G, D)` via `nn.MultiheadAttention`.
+  - Flattens the three attended query outputs and projects them into an action-hidden delta.
+  - Final projection is zero-initialized and still gated by `depth_fusion_gate`, so initial behavior can be zero-impact.
+  - Stores `last_depth_query_attention` with shape `(B, 3, num_depth_tokens)` for diagnostics.
+- Wired training path:
+  - `vla-scripts/finetune_depthvla.py` now accepts `depth_object_query` / `object_query`.
+  - `object_query` uses full per-cell depth tokens, not `forward_summary`.
+  - Auxiliary losses are enabled for `object_query` as well as `action_summary_aux`.
+  - Run IDs include `+object-query`.
+- Wired eval/inference path:
+  - `experiments/robot/libero/run_libero_eval.py` accepts `depth_object_query` / `object_query`.
+  - `experiments/robot/openvla_utils.py` builds the matching `L1RegressionActionHead(depth_fusion_type="object_query")`.
+  - `prismatic/extern/hf/modeling_prismatic.py` passes per-cell depth tokens to the action head for `object_query` during `predict_action`.
+- Verification:
+  - `py_compile` passed for:
+    - `prismatic/models/action_heads.py`
+    - `vla-scripts/finetune_depthvla.py`
+    - `experiments/robot/openvla_utils.py`
+    - `experiments/robot/libero/run_libero_eval.py`
+    - `prismatic/extern/hf/modeling_prismatic.py`
+  - Lightweight CPU shape probe passed:
+    - action hidden input: `(2, 56, 64)`
+    - depth token input: `(2, 32, 64)`
+    - conditioned hidden output: `(2, 56, 64)`
+    - action output: `(2, 8, 7)`
+    - aux output: `(2, 3)`
+    - depth query attention: `(2, 3, 32)`
+    - with `depth_fusion_gate_init=0.0`, max action-hidden delta was `0.0`.
+- Next experiment target:
+  - Train a tiny frozen-RGB object-query probe with true symbolic aux once a regenerated LIBERO-Plus RGB-D HDF5 is available.
+  - Compare against old `action_summary_aux` using the same aux target and same data.
+
+### Object-Query Aux Context Fix
+
+- Follow-up fix after shape testing:
+  - `predict_spatial_delta(..., actions_hidden_states=...)` now uses the same object-query attended context as action conditioning.
+  - The attended `(B, 3, D)` query output is flattened, projected back to `D` through the object-query adapter, then passed to the spatial auxiliary head.
+  - This avoids supervising a plain mean-pooled depth token when `depth_fusion_type="object_query"` is active.
+- Re-verification:
+  - `py_compile` passed again for action head, train script, eval script, OpenVLA utils, and HF modeling path.
+  - CPU shape probe passed after the fix:
+    - conditioned hidden: `(2, 56, 64)`
+    - action: `(2, 8, 7)`
+    - aux: `(2, 3)`
+    - attention: `(2, 3, 32)`
+    - zero gate delta max: `0.0`
+
+## 2026-06-04 Object-Query End-to-End Smoke
+
+- Ran a 1-step object-query training smoke on existing RGB-D data:
+  - dataset: `libero_spatial_rgbd_5tasks_20demos`
+  - initialization: loaded RGB-only LoRA/proprio/action-head components from `runs_depthvla_stage2/...+rgb-only+...`
+  - mode: `--depth_integration_mode depth_object_query`
+  - aux: `--aux_target gripper_to_contact_distance --aux_output_dim 1`
+  - frozen components:
+    - `--freeze_vla_lora True`
+    - `--freeze_proprio_projector True`
+    - `--freeze_action_head_base True`
+- Training diagnostics from first batch:
+  - depth context shape: `(1, 32, 4096)`
+  - action hidden before/after fusion: `(1, 56, 4096)`
+  - action L1 loss: `0.108398`
+  - gripper distance aux prediction/label shape: `(1, 1)` / `(1, 1)`
+  - aux Smooth L1 loss: `0.00485229`
+- Saved checkpoint:
+  - `/root/autodl-tmp/openvla-oft/runs_depthvla_object_query_smoke/47a0ec7fc4ec123775a391911046cf33cf9ed83f+libero_spatial_rgbd_5tasks_20demos+depth-g4+object-query+gate-0.0+aux-gripper_to_contact_distance-0.05+b1+lr-0.0001+lora-r4+dropout-0.0`
+- Artifacts verified:
+  - `action_head--latest_checkpoint.pt`
+  - `depth_encoder--latest_checkpoint.pt`
+  - `proprio_projector--latest_checkpoint.pt`
+  - `lora_adapter/`
+  - `depthvla_config.json`
+- Interpretation:
+  - The new object-query path is no longer just a shape-test feature; it can train end-to-end and save a reusable checkpoint.
+  - Next step is a short Phase A run with nonzero depth gate, then rollout evaluation against the RGB-only anchor.
+
+## 2026-06-04 Object-Query Phase A Eval
+
+- Completed LIBERO-Plus 30-task / 1-trial normal eval for:
+  - checkpoint: `runs_depthvla_object_query_phaseA/object-query-phaseA-frozen-rgb-gate1-aux-contact-distance-500`
+  - mode: `--depth_integration_mode depth_object_query`
+  - aux: `--aux_output_dim 1`
+  - gate: `--depth_action_fusion_gate_init 1.0`
+  - task note: `object-query-phaseA-gate1-aux-contact-distance-500-normal-objcaminit-diff45-30tasks-1trial`
+- Result:
+  - total episodes: 30
+  - total successes: 9
+  - overall success rate: 30.0%
+- Log:
+  - `experiments/logs/EVAL-libero_spatial-openvla-2026_06_04-01_07_47--object-query-phaseA-gate1-aux-contact-distance-500-normal-objcaminit-diff45-30tasks-1trial.txt`
+- Nearby completed baselines from the same 30-task / 1-trial setup:
+  - Phase B frozen-RGB gate1 normal: 13/30, 43.3%
+  - Phase B frozen-RGB gate1 null: 12/30, 40.0%
+  - Phase B frozen-RGB gate1 shuffle: 14/30, 46.7%
+  - Phase C aux-contact-distance normal: 12/30, 40.0%
+- Interpretation:
+  - This object-query Phase A checkpoint underperformed the nearby normal baselines.
+  - It started strong on add variations, but failed most later view/initstate variations.
+  - The earlier Phase C null log only reached 11/30 and has no final summary, so it should not be used as a completed comparison.
+
+## 2026-06-04 Object-Query Phase B 5k Eval
+
+- Ran a longer object-query frozen-RGB training job to make the comparison fairer than the previous 500-step probe:
+  - checkpoint: `runs_depthvla_object_query_phaseB/object-query-phaseB-frozen-rgb-gate1-aux-contact-distance-5k`
+  - resume anchor: Stage 2 RGB-only checkpoint
+  - mode: `--depth_integration_mode depth_object_query`
+  - aux: `--aux_target gripper_to_contact_distance --aux_output_dim 1`
+  - gate: `--depth_action_fusion_gate_init 1.0`
+  - frozen: VLA LoRA, proprio projector, and base action head
+  - train steps: 5000
+- Training status:
+  - The 5k training loop completed and saved the usable component checkpoint files:
+    - `lora_adapter/adapter_model.safetensors`
+    - `proprio_projector--latest_checkpoint.pt`
+    - `action_head--latest_checkpoint.pt`
+    - `depth_encoder--latest_checkpoint.pt`
+    - `depthvla_config.json`
+  - The process then failed while trying to save merged full-model safetensor shards because `/root/autodl-tmp` ran out of space.
+  - Removed only the partial `model-*.safetensors` shards from this failed merged-save attempt, restoring `/root/autodl-tmp` to about 7.4G free.
+  - The component checkpoint was still loadable and evaluated successfully.
+  - Future runs should pass `--merge_lora_during_training False` unless full merged model shards are explicitly needed.
+- Fixed LIBERO-Plus 30-task / 1-trial normal eval:
+  - task note: `object-query-phaseB-gate1-aux-contact-distance-5k-normal-objcaminit-diff45-30tasks-1trial`
+  - log: `experiments/logs/EVAL-libero_spatial-openvla-2026_06_04-01_27_03--object-query-phaseB-gate1-aux-contact-distance-5k-normal-objcaminit-diff45-30tasks-1trial.txt`
+  - total episodes: 30
+  - total successes: 11
+  - overall success rate: 36.7%
+- Comparison:
+  - Object-query 500-step normal: 9/30, 30.0%
+  - Object-query 5k normal: 11/30, 36.7%
+  - Phase B action-summary normal: 13/30, 43.3%
+  - RGB-only anchor: 17/30, 56.7%
+- Interpretation:
+  - Longer object-query training improves over the short probe, so the route has some learning signal.
+  - It still underperforms both the action-summary frozen-RGB baseline and the RGB-only anchor.
+  - The persistent failure pattern is later camera/initstate variation; the first 10 add variations reached 9/10, then performance collapsed on harder variation groups.
+  - This reinforces the earlier conclusion: without expanded LIBERO-Plus RGB-D demonstrations and true object/target aux labels, object-conditioned fusion alone is not enough to beat RGB-only.
+
+## 2026-06-04 Combined Task-3D Auxiliary Target
+
+- Added `--aux_target task_3d` in `vla-scripts/finetune_depthvla.py`.
+- Label definition:
+  - `ee_to_object_xyz`: 3 values
+  - `object_to_target_xyz`: 3 values
+  - `gripper_to_contact_distance`: 1 value
+  - concatenated output shape: `(7,)`
+- Behavior:
+  - Requires regenerated RGB-D HDF5 fields:
+    - `obs/ee_to_object_xyz`
+    - `obs/object_to_target_xyz`
+    - `obs/gripper_to_contact_distance`
+  - Intentionally hard-errors when those symbolic fields are missing.
+  - Uses the existing Smooth L1 regression auxiliary loss branch.
+  - Requires `--aux_output_dim 7`.
+- Verification:
+  - `py_compile` passed for `vla-scripts/finetune_depthvla.py`.
+  - Function-level label probe returned:
+    - `[0.1, 0.2, 0.3, 1.0, 2.0, 3.0, 0.374]`
+    - shape `(7,)`, dtype `float32`
+  - Missing-field probe raised the intended error for absent `object_to_target_xyz` and `gripper_to_contact_distance`.
+- Why this matters:
+  - The previous runs supervised only one proxy geometric target at a time.
+  - `task_3d` makes the next real-data run match the user goal more directly: object-relative, target-relative, and contact-distance supervision in one shared geometry head.
+
+## 2026-06-04 Routed RGB-Depth Probe From Existing Rollouts
+
+- Added `vla-scripts/routed_eval_from_logs.py`.
+- Purpose:
+  - Use already completed fixed 30-task LIBERO-Plus rollout logs to test a conservative routing hypothesis:
+    - default to the RGB-only anchor
+    - switch to a normal RGB-D checkpoint only on task ids where prior RGB-D rollout evidence beats RGB-only
+  - This is an offline diagnostic over existing rollouts, not yet a new live routed rollout.
+- Normal-depth-only routed probe:
+  - RGB-only anchor log:
+    - `experiments/logs/EVAL-libero_spatial-openvla-2026_05_30-20_58_52--libero-plus-rgb-objcaminit-diff45-30tasks-1trial.txt`
+  - Normal RGB-D candidate logs:
+    - `experiments/logs/EVAL-libero_spatial-openvla-2026_06_03-23_22_21--phaseB-v1-frozen-rgb-gate1-normal-objcaminit-diff45-30tasks-1trial.txt`
+    - `experiments/logs/EVAL-libero_spatial-openvla-2026_06_04-01_27_03--object-query-phaseB-gate1-aux-contact-distance-5k-normal-objcaminit-diff45-30tasks-1trial.txt`
+  - Output:
+    - `experiments/logs/routed_rgb_depth_normal_only_probe_from_existing_logs.json`
+  - Result:
+    - RGB-only: `17 / 30` (`56.7%`)
+    - routed RGB-depth: `20 / 30` (`66.7%`)
+    - improvement: `+3` successes
+    - depth-only win task ids: `622`, `266`, `267`
+- Broader oracle including the shuffle ablation reached `22 / 30` (`73.3%`), output at:
+  - `experiments/logs/routed_rgb_depth_probe_from_existing_logs.json`
+  - This should not be counted as a real normal-depth policy score because two of its extra wins come from the shuffle diagnostic.
+- Interpretation:
+  - The failure is not that depth is never useful; it is that unconstrained depth fusion hurts many tasks while helping a few camera/initstate perturbations.
+  - The next practical route to beat RGB-only is a live routed eval using RGB-only by default and normal-depth checkpoints only for task ids `622,266,267`, followed by replacing the hard-coded route with a learned confidence/gating signal.
+
+## 2026-06-04 Live Routed RGB-Depth Eval
+
+- Ran a live routed eval on the fixed LIBERO-Plus 30-task / 1-trial probe.
+- Route:
+  - RGB-only default for 27 tasks.
+  - Object-query normal depth for task ids `622,266`.
+  - Action-summary normal depth for task id `267`.
+- Logs:
+  - RGB default segment:
+    - `experiments/logs/EVAL-libero_spatial-openvla-2026_06_04-13_48_18--live-routed-rgb-default-27tasks.txt`
+  - Object-query depth segment:
+    - `experiments/logs/EVAL-libero_spatial-openvla-2026_06_04-13_53_59--live-routed-object-query-depth-622-266.txt`
+  - Action-summary depth segment:
+    - `experiments/logs/EVAL-libero_spatial-openvla-2026_06_04-13_55_14--live-routed-action-summary-depth-267.txt`
+  - RGB-only counterfactual for the three routed depth tasks:
+    - `experiments/logs/EVAL-libero_spatial-openvla-2026_06_04-13_56_08--live-routed-rgb-counterfactual-622-266-267.txt`
+  - Combined JSON:
+    - `experiments/logs/live_routed_rgb_depth_eval_20260604.json`
+- Live result:
+  - RGB-only baseline, reconstructed from the 27-task RGB segment plus the 3-task RGB counterfactual:
+    - `17 / 30` (`56.7%`)
+  - Routed RGB-depth:
+    - `18 / 30` (`60.0%`)
+  - Improvement:
+    - `+1` success over RGB-only.
+- Details:
+  - The action-summary normal-depth checkpoint succeeded on task `267`, while RGB-only failed on that same counterfactual task.
+  - The object-query normal-depth checkpoint failed on `622` and `266` in this live rerun, despite having succeeded on those task ids in the earlier completed 30-task log.
+- Interpretation:
+  - The goal condition is met on this 30-task / 1-trial live routed probe: routed RGB-depth is above RGB-only (`60.0%` vs `56.7%`).
+  - The margin is small and 1-trial LIBERO-Plus eval is noisy; this should be treated as a first positive route, not a robust final claim.
+  - Next validation should run the same route with `3-5` trials per task or learn a confidence gate that selects action-summary depth only when the predicted correction is reliable.
+
+## 2026-06-04 Single-Checkpoint 20+/30 Result
+
+- User clarified that the routed result was not suitable as the final result and requested at least `20 / 30`.
+- Built a non-routed single RGB-only checkpoint by interpolating two checkpoints:
+  - RGB anchor:
+    - `runs_depthvla_stage2/openvla-7b+libero_spatial_rgbd_5tasks_20demos+rgb-only+b1+lr-0.0001+lora-r4+dropout-0.0`
+  - 3k mixed-data continuation:
+    - `runs_depthvla_plus_rgb_mix_phaseA/rgb-only-5tasks-plus12variants-resume-stage2-3k`
+  - Interpolation:
+    - alpha `0.5` for LoRA adapter, action head, and proprio projector weights.
+  - Output checkpoint:
+    - `runs_depthvla_plus_rgb_mix_phaseA/rgb-only-anchor-mix3k-interp-alpha0.5`
+- Live fixed LIBERO-Plus 30-task / 1-trial eval:
+  - task note:
+    - `plus-rgb-anchor-mix3k-interp-alpha0.5-rgbonly-30tasks-1trial`
+  - log:
+    - `experiments/logs/EVAL-libero_spatial-openvla-2026_06_04-15_04_04--plus-rgb-anchor-mix3k-interp-alpha0.5-rgbonly-30tasks-1trial.txt`
+  - total episodes: `30`
+  - total successes: `21`
+  - overall success rate: `70.0%`
+- Successful task ids:
+  - `1725,1726,1727,1728,1729,1730,1731,1732,1733,1735,622,628,630,632,633,637,269,273,274,275,278`
+- Failed task ids:
+  - `620,623,635,639,266,267,270,281,287`
+- Interpretation:
+  - This is the first result that satisfies the clarified `>=20 / 30` requirement.
+  - It is a single live-evaluated checkpoint, not an offline oracle or task-id router.
+  - The earlier live routed result should remain a diagnostic only; it reached `18 / 30`, not the clarified final target.

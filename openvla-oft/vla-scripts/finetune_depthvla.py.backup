@@ -994,7 +994,6 @@ def run_forward_pass(
     )
     action_loss = torch.nn.L1Loss()(ground_truth_actions, predicted_actions)
     loss = action_loss
-
     spatial_aux_loss = None
     spatial_pred = None
     spatial_target = None

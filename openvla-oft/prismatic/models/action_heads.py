@@ -88,22 +88,257 @@ class L1RegressionActionHead(nn.Module):
         input_dim=4096,
         hidden_dim=4096,
         action_dim=7,
+        use_depth_conditioning=False,
+        depth_fusion_type="hidden_film",
+        depth_fusion_gate_init=0.001,
+        depth_adapter_hidden_dim=256,
+        spatial_aux_output_dim=3,
     ):
         super().__init__()
         self.action_dim = action_dim
+        self.use_depth_conditioning = use_depth_conditioning
+        self.depth_fusion_type = depth_fusion_type
+        self.spatial_aux_output_dim = int(spatial_aux_output_dim)
         self.model = MLPResNet(
             num_blocks=2, input_dim=input_dim*ACTION_DIM, hidden_dim=hidden_dim, output_dim=action_dim
         )
+        if use_depth_conditioning:
+            self.depth_fusion_gate = nn.Parameter(torch.tensor(float(depth_fusion_gate_init)))
+            if depth_fusion_type == "hidden_film":
+                # Action-side depth fusion: depth never changes the VLM prefix; it only modulates action hidden states.
+                self.depth_context = nn.Sequential(
+                    nn.LayerNorm(input_dim),
+                    nn.Linear(input_dim, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, input_dim * 2),
+                )
+                nn.init.zeros_(self.depth_context[-1].weight)
+                nn.init.zeros_(self.depth_context[-1].bias)
+                self.depth_action_residual = None
+            elif depth_fusion_type == "action_summary_aux":
+                # Action-side summary conditioning: depth summary shifts the
+                # action-token hidden states, without touching the RGB prefix.
+                self.depth_context = nn.Sequential(
+                    nn.LayerNorm(input_dim),
+                    nn.Linear(input_dim, depth_adapter_hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(depth_adapter_hidden_dim, input_dim),
+                )
+                nn.init.zeros_(self.depth_context[-1].weight)
+                nn.init.zeros_(self.depth_context[-1].bias)
+                self.depth_action_residual = None
+            elif depth_fusion_type == "object_query":
+                # Language/action-conditioned depth fusion. The action token
+                # hidden state already carries instruction context, so use it
+                # to form object/target/contact queries over metric depth tokens.
+                num_heads = 8 if input_dim % 8 == 0 else 1
+                self.depth_query_embeddings = nn.Parameter(torch.zeros(3, input_dim))
+                self.depth_query_norm = nn.LayerNorm(input_dim)
+                self.depth_query_proj = nn.Linear(input_dim, input_dim)
+                self.depth_language_query_norm = nn.LayerNorm(input_dim)
+                self.depth_language_query_proj = nn.Linear(input_dim, input_dim)
+                self.depth_token_norm = nn.LayerNorm(input_dim)
+                self.depth_cross_attn = nn.MultiheadAttention(input_dim, num_heads=num_heads, batch_first=True)
+                self.depth_context = nn.Sequential(
+                    nn.LayerNorm(input_dim * 3),
+                    nn.Linear(input_dim * 3, depth_adapter_hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(depth_adapter_hidden_dim, input_dim),
+                )
+                self.object_query_spatial_heads = nn.ModuleDict(
+                    {
+                        "ee_to_object_xyz": nn.Sequential(
+                            nn.LayerNorm(input_dim),
+                            nn.Linear(input_dim, depth_adapter_hidden_dim),
+                            nn.GELU(),
+                            nn.Linear(depth_adapter_hidden_dim, 3),
+                        ),
+                        "object_to_target_xyz": nn.Sequential(
+                            nn.LayerNorm(input_dim),
+                            nn.Linear(input_dim, depth_adapter_hidden_dim),
+                            nn.GELU(),
+                            nn.Linear(depth_adapter_hidden_dim, 3),
+                        ),
+                        "gripper_to_contact_distance": nn.Sequential(
+                            nn.LayerNorm(input_dim),
+                            nn.Linear(input_dim, depth_adapter_hidden_dim),
+                            nn.GELU(),
+                            nn.Linear(depth_adapter_hidden_dim, 1),
+                        ),
+                        "distance_bin": nn.Sequential(
+                            nn.LayerNorm(input_dim),
+                            nn.Linear(input_dim, depth_adapter_hidden_dim),
+                            nn.GELU(),
+                            nn.Linear(depth_adapter_hidden_dim, self.spatial_aux_output_dim),
+                        ),
+                        "relative_z_bin": nn.Sequential(
+                            nn.LayerNorm(input_dim),
+                            nn.Linear(input_dim, depth_adapter_hidden_dim),
+                            nn.GELU(),
+                            nn.Linear(depth_adapter_hidden_dim, self.spatial_aux_output_dim),
+                        ),
+                    }
+                )
+                nn.init.normal_(self.depth_query_embeddings, mean=0.0, std=0.02)
+                nn.init.zeros_(self.depth_query_proj.weight)
+                nn.init.zeros_(self.depth_query_proj.bias)
+                nn.init.zeros_(self.depth_language_query_proj.weight)
+                nn.init.zeros_(self.depth_language_query_proj.bias)
+                nn.init.zeros_(self.depth_context[-1].weight)
+                nn.init.zeros_(self.depth_context[-1].bias)
+                self.depth_action_residual = None
+                self.last_depth_query_attention = None
+            elif depth_fusion_type == "action_residual":
+                self.depth_context = None
+                adapter_input_dim = input_dim * 2
+                self.depth_action_residual = nn.Sequential(
+                    nn.LayerNorm(adapter_input_dim),
+                    nn.Linear(adapter_input_dim, depth_adapter_hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(depth_adapter_hidden_dim, action_dim),
+                )
+                nn.init.zeros_(self.depth_action_residual[-1].weight)
+                nn.init.zeros_(self.depth_action_residual[-1].bias)
+            else:
+                raise ValueError(f"Unknown depth_fusion_type: {depth_fusion_type}")
+            self.spatial_head = nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, depth_adapter_hidden_dim),
+                nn.GELU(),
+                nn.Linear(depth_adapter_hidden_dim, self.spatial_aux_output_dim),
+            )
+        else:
+            self.depth_context = None
+            self.depth_action_residual = None
+            self.spatial_head = None
+            self.object_query_spatial_heads = None
 
-    def predict_action(self, actions_hidden_states):
+    def pool_depth_context(self, depth_context):
+        if depth_context is None:
+            return None
+        if depth_context.ndim == 3:
+            depth_context = depth_context.mean(dim=1)
+        if depth_context.ndim != 2:
+            raise ValueError(f"Expected depth_context with shape (B,D) or (B,T,D), got {tuple(depth_context.shape)}")
+        return depth_context
+
+    def _pool_depth_context(self, depth_context):
+        return self.pool_depth_context(depth_context)
+
+    def object_query_attended_tokens(self, actions_hidden_states, depth_context, query_context=None):
+        if depth_context.ndim != 3:
+            raise ValueError(
+                f"object_query depth fusion expects per-cell depth tokens with shape (B,T,D), got {tuple(depth_context.shape)}"
+            )
+        batch_size = actions_hidden_states.shape[0]
+        action_context = actions_hidden_states.reshape(batch_size, NUM_ACTIONS_CHUNK, ACTION_DIM, -1).mean(dim=(1, 2))
+        query_seed = self.depth_query_proj(self.depth_query_norm(action_context))
+        if query_context is not None:
+            if query_context.ndim == 3:
+                query_context = query_context.mean(dim=1)
+            if query_context.ndim != 2:
+                raise ValueError(
+                    f"object_query query_context expects shape (B,D) or (B,T,D), got {tuple(query_context.shape)}"
+                )
+            query_context = query_context.to(device=actions_hidden_states.device, dtype=actions_hidden_states.dtype)
+            query_seed = query_seed + self.depth_language_query_proj(self.depth_language_query_norm(query_context))
+        queries = query_seed.unsqueeze(1) + self.depth_query_embeddings.to(
+            device=actions_hidden_states.device, dtype=actions_hidden_states.dtype
+        ).unsqueeze(0)
+        depth_tokens = self.depth_token_norm(depth_context.to(device=actions_hidden_states.device, dtype=actions_hidden_states.dtype))
+        attended, attn_weights = self.depth_cross_attn(queries, depth_tokens, depth_tokens, need_weights=True)
+        self.last_depth_query_attention = attn_weights.detach()
+        return attended
+
+    def object_query_context(self, actions_hidden_states, depth_context, query_context=None):
+        attended = self.object_query_attended_tokens(actions_hidden_states, depth_context, query_context=query_context)
+        batch_size = actions_hidden_states.shape[0]
+        return attended.reshape(batch_size, -1)
+
+    def condition_action_hidden_states(self, actions_hidden_states, depth_context=None, query_context=None):
+        if not self.use_depth_conditioning or depth_context is None:
+            return actions_hidden_states
+        if self.depth_fusion_type not in ("hidden_film", "action_summary_aux", "object_query"):
+            return actions_hidden_states
+        gate = self.depth_fusion_gate.to(dtype=actions_hidden_states.dtype)
+        if self.depth_fusion_type == "object_query":
+            depth_query_context = self.object_query_context(actions_hidden_states, depth_context, query_context=query_context)
+            delta_h = self.depth_context(depth_query_context).unsqueeze(1)
+            return actions_hidden_states + gate * delta_h
+
+        depth_context = self._pool_depth_context(depth_context).to(
+            device=actions_hidden_states.device, dtype=actions_hidden_states.dtype
+        )
+        if self.depth_fusion_type == "action_summary_aux":
+            delta_h = self.depth_context(depth_context).unsqueeze(1)
+            return actions_hidden_states + gate * delta_h
+        scale_shift = self.depth_context(depth_context).unsqueeze(1)
+        scale, shift = scale_shift.chunk(2, dim=-1)
+        return actions_hidden_states + gate * (actions_hidden_states * scale + shift)
+
+    def predict_action_residual(self, actions_hidden_states, depth_context=None):
+        if not self.use_depth_conditioning or self.depth_fusion_type != "action_residual" or depth_context is None:
+            return None
+        batch_size = actions_hidden_states.shape[0]
+        depth_context = self._pool_depth_context(depth_context).to(
+            device=actions_hidden_states.device, dtype=actions_hidden_states.dtype
+        )
+        action_context = actions_hidden_states.reshape(batch_size, NUM_ACTIONS_CHUNK, ACTION_DIM, -1).mean(dim=2)
+        depth_context = depth_context.unsqueeze(1).expand(-1, NUM_ACTIONS_CHUNK, -1)
+        adapter_input = torch.cat([action_context, depth_context], dim=-1)
+        gate = self.depth_fusion_gate.to(dtype=actions_hidden_states.dtype)
+        return gate * self.depth_action_residual(adapter_input)
+
+    def predict_spatial_delta(self, depth_context, actions_hidden_states=None, query_context=None, aux_target="none"):
+        if not self.use_depth_conditioning or self.spatial_head is None:
+            raise ValueError("Spatial auxiliary prediction requires use_depth_conditioning=True")
+        if self.depth_fusion_type == "object_query":
+            if actions_hidden_states is None:
+                raise ValueError("object_query spatial auxiliary prediction requires actions_hidden_states")
+            attended = self.object_query_attended_tokens(
+                actions_hidden_states, depth_context, query_context=query_context
+            )
+            aux_target = str(aux_target or "none")
+            if aux_target in ("relative_xyz", "contact_xyz", "ee_to_object_xyz"):
+                return self.object_query_spatial_heads["ee_to_object_xyz"](attended[:, 0])
+            if aux_target == "object_to_target_xyz":
+                return self.object_query_spatial_heads["object_to_target_xyz"](attended[:, 1])
+            if aux_target == "gripper_to_contact_distance":
+                return self.object_query_spatial_heads["gripper_to_contact_distance"](attended[:, 2])
+            if aux_target == "task_3d":
+                return torch.cat(
+                    [
+                        self.object_query_spatial_heads["ee_to_object_xyz"](attended[:, 0]),
+                        self.object_query_spatial_heads["object_to_target_xyz"](attended[:, 1]),
+                        self.object_query_spatial_heads["gripper_to_contact_distance"](attended[:, 2]),
+                    ],
+                    dim=-1,
+                )
+            if aux_target == "distance_bin":
+                return self.object_query_spatial_heads["distance_bin"](attended[:, 2])
+            if aux_target == "relative_z_bin":
+                return self.object_query_spatial_heads["relative_z_bin"](attended[:, 0])
+            depth_context = self.depth_context(attended.reshape(actions_hidden_states.shape[0], -1))
+        else:
+            depth_context = self._pool_depth_context(depth_context)
+        ref_param = next(self.spatial_head.parameters())
+        depth_context = depth_context.to(device=ref_param.device, dtype=ref_param.dtype)
+        return self.spatial_head(depth_context)
+
+    def predict_action(self, actions_hidden_states, depth_context=None, query_context=None):
         # actions_hidden_states: last hidden states of Transformer corresponding to action tokens in sequence
         # - shape: (batch_size, chunk_len * action_dim, hidden_dim)
         # ground_truth_actions: ground-truth actions
         # - shape: (batch_size, chunk_len, action_dim)
         batch_size = actions_hidden_states.shape[0]
-        device = actions_hidden_states.device
-        rearranged_actions_hidden_states = actions_hidden_states.reshape(batch_size, NUM_ACTIONS_CHUNK, -1)
+        conditioned_hidden_states = self.condition_action_hidden_states(
+            actions_hidden_states, depth_context, query_context=query_context
+        )
+        rearranged_actions_hidden_states = conditioned_hidden_states.reshape(batch_size, NUM_ACTIONS_CHUNK, -1)
         action = self.model(rearranged_actions_hidden_states)
+        residual = self.predict_action_residual(actions_hidden_states, depth_context)
+        if residual is not None:
+            action = action + residual
         return action
 
 

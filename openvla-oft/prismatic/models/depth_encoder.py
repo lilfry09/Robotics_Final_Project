@@ -29,6 +29,9 @@ class LightweightDepthTokenEncoder(nn.Module):
         num_views: int = 2,
         geometry_norm: str = "none",
         geometry_clip: float | None = 5.0,
+        enable_summary: bool = False,
+        summary_repr: str = "base_xyz",
+        summary_pool: str = "meanmax",
     ) -> None:
         super().__init__()
         self.llm_dim = llm_dim
@@ -40,6 +43,9 @@ class LightweightDepthTokenEncoder(nn.Module):
         self.depth_num_tokens = num_views * grid_size * grid_size
         self.geometry_norm = geometry_norm
         self.geometry_clip = geometry_clip
+        self.enable_summary = enable_summary
+        self.summary_repr = summary_repr
+        self.summary_pool = summary_pool
 
         self.encoder = nn.Sequential(
             nn.Linear(8, hidden_dim),
@@ -47,6 +53,43 @@ class LightweightDepthTokenEncoder(nn.Module):
             nn.Linear(hidden_dim, llm_dim),
             nn.LayerNorm(llm_dim),
         )
+        self.summary_mlp = None
+        self.set_encoder = None
+        self.set_summary_mlp = None
+        self.summary_feature_dim = 8
+        if enable_summary:
+            if summary_repr == "base_xyz":
+                # Action-side summary conditioning: compact depth representation for
+                # the action head. This is not appended to the VLM/LLM prefix.
+                self.summary_mlp = nn.Sequential(
+                    nn.LayerNorm(llm_dim * num_views),
+                    nn.Linear(llm_dim * num_views, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, llm_dim),
+                    nn.LayerNorm(llm_dim),
+                )
+            elif summary_repr == "ee_relative_set_v2":
+                if summary_pool != "meanmax":
+                    raise ValueError(f"Unknown summary_pool for ee_relative_set_v2: {summary_pool}")
+                # Robot-centric Deep Sets / PointNet-style summary. Each coarse
+                # geometry cell is encoded independently, then pooled without
+                # depending on cell order.
+                self.summary_feature_dim = 9
+                self.set_encoder = nn.Sequential(
+                    nn.Linear(self.summary_feature_dim, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, llm_dim),
+                    nn.LayerNorm(llm_dim),
+                )
+                self.set_summary_mlp = nn.Sequential(
+                    nn.LayerNorm(llm_dim * 2),
+                    nn.Linear(llm_dim * 2, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, llm_dim),
+                    nn.LayerNorm(llm_dim),
+                )
+            else:
+                raise ValueError(f"Unknown summary_repr: {summary_repr}")
         self.alpha = nn.Parameter(torch.tensor(0.01))
         self.ablation_mode = "none"
         self.shuffle_seed = 0
@@ -58,6 +101,9 @@ class LightweightDepthTokenEncoder(nn.Module):
         stats: dict | None,
         geometry_norm: str = "none",
         geometry_clip: float | None = 5.0,
+        enable_summary: bool = False,
+        summary_repr: str = "base_xyz",
+        summary_pool: str = "meanmax",
     ) -> None:
         self.geometry_norm = geometry_norm
         self.geometry_clip = geometry_clip
@@ -94,6 +140,62 @@ class LightweightDepthTokenEncoder(nn.Module):
         pooled = self._apply_ablation(pooled)
         tokens = self.encoder(pooled.to(dtype=next(self.encoder.parameters()).dtype))
         return self.alpha.to(tokens.dtype) * tokens
+
+
+    def forward_summary(
+        self,
+        depth_values: torch.Tensor,
+        depth_intrinsics: torch.Tensor,
+        depth_extrinsics: torch.Tensor,
+        depth_valid_mask: torch.Tensor | None = None,
+        ee_pos: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Return compact depth summary with shape (B, llm_dim).
+
+        The same metric geometry features used by the token path are encoded per
+        grid cell, then mean-pooled per view. The two view summaries are
+        concatenated and projected to a single action-side summary embedding.
+        """
+        if self.summary_repr == "ee_relative_set_v2":
+            return self._forward_ee_relative_set_summary(
+                depth_values=depth_values,
+                depth_intrinsics=depth_intrinsics,
+                depth_extrinsics=depth_extrinsics,
+                depth_valid_mask=depth_valid_mask,
+                ee_pos=ee_pos,
+            )
+        if self.summary_mlp is None:
+            raise ValueError("forward_summary requires LightweightDepthTokenEncoder(enable_summary=True)")
+        pooled = self.compute_geometry_features(depth_values, depth_intrinsics, depth_extrinsics, depth_valid_mask)
+        pooled = self._normalize_geometry_features(pooled)
+        pooled = self._apply_ablation(pooled)
+        token_features = self.encoder(pooled.to(dtype=next(self.encoder.parameters()).dtype))
+        bsz = token_features.shape[0]
+        token_features = token_features.reshape(bsz, self.num_views, self.grid_size * self.grid_size, self.llm_dim)
+        view_summary = token_features.mean(dim=2)
+        summary_input = view_summary.reshape(bsz, self.num_views * self.llm_dim)
+        summary = self.summary_mlp(summary_input)
+        return self.alpha.to(summary.dtype) * summary
+
+
+    def _forward_ee_relative_set_summary(
+        self,
+        depth_values: torch.Tensor,
+        depth_intrinsics: torch.Tensor,
+        depth_extrinsics: torch.Tensor,
+        depth_valid_mask: torch.Tensor | None = None,
+        ee_pos: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.set_encoder is None or self.set_summary_mlp is None:
+            raise ValueError("ee_relative_set_v2 requires LightweightDepthTokenEncoder(enable_summary=True)")
+        pooled = self.compute_geometry_features(depth_values, depth_intrinsics, depth_extrinsics, depth_valid_mask)
+        set_features = self._make_ee_relative_features(pooled, ee_pos)
+        set_features = self._apply_ablation(set_features)
+        point_embeddings = self.set_encoder(set_features.to(dtype=next(self.set_encoder.parameters()).dtype))
+        mean_pool = point_embeddings.mean(dim=1)
+        max_pool = point_embeddings.max(dim=1).values
+        summary = self.set_summary_mlp(torch.cat([mean_pool, max_pool], dim=-1))
+        return self.alpha.to(summary.dtype) * summary
 
     def compute_geometry_features(
         self,
@@ -168,6 +270,26 @@ class LightweightDepthTokenEncoder(nn.Module):
         pooled = torch.flip(pooled, dims=[2, 3])
         pooled = pooled.reshape(bsz, num_views * self.grid_size * self.grid_size, 8)
         return pooled
+
+
+    def _make_ee_relative_features(self, features: torch.Tensor, ee_pos: torch.Tensor | None) -> torch.Tensor:
+        """Convert base-frame XYZ cells into robot-centric set features.
+
+        Output feature order: dx, dy, dz, radius, z_camera, valid, u_norm, v_norm, view_id.
+        """
+        if ee_pos is None:
+            raise ValueError("summary_repr='ee_relative_set_v2' requires raw end-effector position ee_pos with shape (B,3)")
+        if ee_pos.ndim == 1:
+            ee_pos = ee_pos.unsqueeze(0)
+        if ee_pos.shape[-1] < 3:
+            raise ValueError(f"Expected ee_pos last dimension >= 3, got {tuple(ee_pos.shape)}")
+        ee_xyz = ee_pos[..., :3].to(device=features.device, dtype=torch.float32).view(features.shape[0], 1, 3)
+        xyz = features[..., :3].to(torch.float32)
+        dxyz = xyz - ee_xyz
+        radius = torch.linalg.norm(dxyz, dim=-1, keepdim=True)
+        z_camera = features[..., 3:4].to(torch.float32)
+        rest = features[..., 4:8].to(torch.float32)
+        return torch.cat([dxyz, radius, z_camera, rest], dim=-1)
 
     def _normalize_geometry_features(self, features: torch.Tensor) -> torch.Tensor:
         mode = getattr(self, "geometry_norm", "none")

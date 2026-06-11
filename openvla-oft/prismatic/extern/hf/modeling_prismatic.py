@@ -469,6 +469,40 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         ).to(device=projected_patch_embeddings.device, dtype=projected_patch_embeddings.dtype)
         return torch.cat((projected_patch_embeddings, depth_tokens), dim=1)
 
+    def _encode_depth_context(
+        self,
+        projected_patch_embeddings,
+        depth_values=None,
+        depth_intrinsics=None,
+        depth_extrinsics=None,
+        depth_valid_mask=None,
+        depth_ee_pos=None,
+        depth_encoder=None,
+        summary: bool = False,
+    ):
+        """Encode depth maps for action-side fusion without appending to the VLM prefix."""
+        if depth_encoder is None:
+            return None
+        if depth_values is None or depth_intrinsics is None or depth_extrinsics is None:
+            raise ValueError("depth_values, depth_intrinsics, and depth_extrinsics are required when depth_encoder is set")
+
+        if summary:
+            depth_context = depth_encoder.forward_summary(
+                depth_values=depth_values,
+                depth_intrinsics=depth_intrinsics,
+                depth_extrinsics=depth_extrinsics,
+                depth_valid_mask=depth_valid_mask,
+                ee_pos=depth_ee_pos,
+            )
+        else:
+            depth_context = depth_encoder(
+                depth_values=depth_values,
+                depth_intrinsics=depth_intrinsics,
+                depth_extrinsics=depth_extrinsics,
+                depth_valid_mask=depth_valid_mask,
+            )
+        return depth_context.to(device=projected_patch_embeddings.device, dtype=projected_patch_embeddings.dtype)
+
     def get_num_prefix_tokens(
         self,
         use_depth: bool = False,
@@ -560,6 +594,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         depth_extrinsics=None,
         depth_valid_mask=None,
         depth_encoder=None,
+        depth_fusion_mode: str = "prefix",
     ) -> Union[Tuple, PrismaticCausalLMOutputWithPast]:
         """Run a forward pass through the VLM, returning a PrismaticCausalLMOutputWithPast instance."""
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -630,15 +665,18 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             # Get visual features
             projected_patch_embeddings = self._process_vision_features(pixel_values, language_embeddings, use_film)
 
-            # Add depth geometry tokens if provided
-            projected_patch_embeddings = self._process_depth_features(
-                projected_patch_embeddings,
-                depth_values=depth_values,
-                depth_intrinsics=depth_intrinsics,
-                depth_extrinsics=depth_extrinsics,
-                depth_valid_mask=depth_valid_mask,
-                depth_encoder=depth_encoder,
-            )
+            # Add depth geometry tokens only for the prefix-token DepthVLA path.
+            if depth_fusion_mode == "prefix":
+                projected_patch_embeddings = self._process_depth_features(
+                    projected_patch_embeddings,
+                    depth_values=depth_values,
+                    depth_intrinsics=depth_intrinsics,
+                    depth_extrinsics=depth_extrinsics,
+                    depth_valid_mask=depth_valid_mask,
+                    depth_encoder=depth_encoder,
+                )
+            elif depth_fusion_mode not in ("action_head", "action_residual", "action_summary_aux", "object_query"):
+                raise ValueError(f"Unknown depth_fusion_mode: {depth_fusion_mode}")
 
             # Add proprioceptive state if provided
             projected_patch_embeddings = self._process_proprio_features(
@@ -765,6 +803,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                 "depth_extrinsics": kwargs.get("depth_extrinsics"),
                 "depth_valid_mask": kwargs.get("depth_valid_mask"),
                 "depth_encoder": kwargs.get("depth_encoder"),
+                "depth_fusion_mode": kwargs.get("depth_fusion_mode", "prefix"),
                 "past_key_values": past_key_values,
                 "use_cache": kwargs.get("use_cache"),
             }
@@ -944,6 +983,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         NUM_PATCHES,
         NUM_PROMPT_TOKENS,
         action_head=None,
+        depth_context=None,
+        query_context=None,
     ):
         """Run L1 regression-based continuous action prediction or discrete action tokens prediction."""
         # Zero out action token embeddings
@@ -971,6 +1012,11 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
 
         # Extract hidden states for action tokens
         last_hidden_states = language_model_output.hidden_states[-1]  # (B, seq_len, D)
+        if query_context is None and NUM_PROMPT_TOKENS > 1:
+            prompt_start = NUM_PATCHES + 1
+            prompt_end = NUM_PATCHES + NUM_PROMPT_TOKENS
+            if prompt_end > prompt_start:
+                query_context = last_hidden_states[:, prompt_start:prompt_end, :].mean(dim=1)
         actions_hidden_states = last_hidden_states[
             :,
             NUM_PATCHES + NUM_PROMPT_TOKENS : NUM_PATCHES + NUM_PROMPT_TOKENS + ACTION_DIM * NUM_ACTIONS_CHUNK,
@@ -980,7 +1026,9 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         # Handle different prediction methods
         if action_head is not None:
             # L1 regression prediction
-            normalized_actions = action_head.predict_action(actions_hidden_states)
+            normalized_actions = action_head.predict_action(
+                actions_hidden_states, depth_context=depth_context, query_context=query_context
+            )
             normalized_actions = normalized_actions.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
             normalized_actions = normalized_actions.float().cpu().detach().numpy()
         else:
@@ -1011,6 +1059,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         noisy_action_projector=None,
         use_film: bool = False,
         depth_encoder=None,
+        depth_fusion_mode: str = "prefix",
         **kwargs: str,
     ) -> np.ndarray:
         """Predict actions from input sequence, with options for different prediction methods.
@@ -1041,6 +1090,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         depth_intrinsics = kwargs.get("depth_intrinsics")
         depth_extrinsics = kwargs.get("depth_extrinsics")
         depth_valid_mask = kwargs.get("depth_valid_mask")
+        depth_ee_pos = kwargs.get("depth_ee_pos")
 
         # Create fake labels tensor (needed for action mask)
         labels = input_ids.clone()
@@ -1067,16 +1117,32 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         # Process vision features
         projected_patch_embeddings = self._process_vision_features(pixel_values, language_embeddings, use_film)
 
-        # Add depth geometry tokens if provided
+        # Add depth geometry tokens to the prefix, or keep them aside for action-head fusion.
         use_depth = depth_encoder is not None
-        projected_patch_embeddings = self._process_depth_features(
-            projected_patch_embeddings,
-            depth_values=depth_values,
-            depth_intrinsics=depth_intrinsics,
-            depth_extrinsics=depth_extrinsics,
-            depth_valid_mask=depth_valid_mask,
-            depth_encoder=depth_encoder,
-        )
+        use_depth_prefix = use_depth and depth_fusion_mode == "prefix"
+        depth_context = None
+        if use_depth_prefix:
+            projected_patch_embeddings = self._process_depth_features(
+                projected_patch_embeddings,
+                depth_values=depth_values,
+                depth_intrinsics=depth_intrinsics,
+                depth_extrinsics=depth_extrinsics,
+                depth_valid_mask=depth_valid_mask,
+                depth_encoder=depth_encoder,
+            )
+        elif use_depth and depth_fusion_mode in ("action_head", "action_residual", "action_summary_aux", "object_query"):
+            depth_context = self._encode_depth_context(
+                projected_patch_embeddings,
+                depth_values=depth_values,
+                depth_intrinsics=depth_intrinsics,
+                depth_extrinsics=depth_extrinsics,
+                depth_valid_mask=depth_valid_mask,
+                depth_ee_pos=depth_ee_pos,
+                depth_encoder=depth_encoder,
+                summary=depth_fusion_mode == "action_summary_aux",
+            )
+        elif use_depth:
+            raise ValueError(f"Unknown depth_fusion_mode: {depth_fusion_mode}")
 
         # Add proprioceptive features if provided
         use_proprio = proprio_projector is not None and proprio is not None
@@ -1088,10 +1154,11 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
 
         # Use diffusion if provided, otherwise use regression or discrete prediction
         use_diffusion = noisy_action_projector is not None and hasattr(action_head, "noise_scheduler")
+        query_context = None
 
-        depth_num_tokens = getattr(depth_encoder, "depth_num_tokens", 0) if depth_encoder is not None else 0
+        depth_num_tokens = getattr(depth_encoder, "depth_num_tokens", 0) if use_depth_prefix else 0
         NUM_PATCHES = self.get_num_prefix_tokens(
-            use_depth=use_depth,
+            use_depth=use_depth_prefix,
             depth_num_tokens=depth_num_tokens,
             use_proprio=use_proprio,
             use_diffusion=use_diffusion,
@@ -1127,6 +1194,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                 NUM_PATCHES,
                 NUM_PROMPT_TOKENS,
                 action_head,
+                depth_context,
+                query_context,
             )
 
         # Unnormalize predicted actions
