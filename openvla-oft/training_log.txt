@@ -1,0 +1,108 @@
+2026-06-16 13:16:23.640787: I tensorflow/core/util/port.cc:113] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-06-16 13:16:23.678457: E external/local_xla/xla/stream_executor/cuda/cuda_dnn.cc:9261] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+2026-06-16 13:16:23.678479: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:607] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+2026-06-16 13:16:23.679585: E external/local_xla/xla/stream_executor/cuda/cuda_blas.cc:1515] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+2026-06-16 13:16:23.685492: I tensorflow/core/platform/cpu_feature_guard.cc:182] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 AVX_VNNI AMX_TILE AMX_INT8 AMX_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2026-06-16 13:16:24.317499: W tensorflow/compiler/tf2tensorrt/utils/py_utils.cc:38] TF-TRT Warning: Could not find TensorRT
+2026-06-16 13:16:25.348771: W tensorflow/core/common_runtime/gpu/gpu_device.cc:2256] Cannot dlopen some GPU libraries. Please make sure the missing libraries mentioned above are installed properly if you would like to use GPU. Follow the guide at https://www.tensorflow.org/install/gpu for how to download and setup the required libraries for your platform.
+Skipping registering GPU devices...
+
+  0%|          | 0/12 [00:00<?, ?it/s]
+100%|██████████| 12/12 [00:00<00:00, 1879.87it/s]
+
+Using LIBERO constants:
+  NUM_ACTIONS_CHUNK = 8
+  ACTION_DIM = 7
+  PROPRIO_DIM = 8
+  ACTION_PROPRIO_NORMALIZATION_TYPE = bounds_q99
+If needed, manually set the correct constants in `prismatic/vla/constants.py`!
+Using device: cuda
+Loading data from 12 episodes...
+Total samples: 1426
+Train samples: 1140, Test samples: 286
+
+Training for 3000 steps...
+Step 50/3000: loss=0.0213, obj=0.0105, tgt=0.0108, lr=0.000300
+Step 100/3000: loss=0.0211, obj=0.0103, tgt=0.0108, lr=0.000299
+Step 150/3000: loss=0.0209, obj=0.0105, tgt=0.0104, lr=0.000298
+Step 200/3000: loss=0.0201, obj=0.0101, tgt=0.0100, lr=0.000297
+  Test - Object PSNR: 19.85 dB, Target PSNR: 19.74 dB
+Step 250/3000: loss=0.0211, obj=0.0103, tgt=0.0108, lr=0.000295
+Step 300/3000: loss=0.0208, obj=0.0104, tgt=0.0104, lr=0.000293
+Step 350/3000: loss=0.0204, obj=0.0100, tgt=0.0104, lr=0.000290
+Step 400/3000: loss=0.0206, obj=0.0102, tgt=0.0104, lr=0.000287
+  Test - Object PSNR: 19.85 dB, Target PSNR: 19.74 dB
+Step 450/3000: loss=0.0210, obj=0.0104, tgt=0.0106, lr=0.000284
+Step 500/3000: loss=0.0210, obj=0.0104, tgt=0.0106, lr=0.000280
+Step 550/3000: loss=0.0212, obj=0.0104, tgt=0.0108, lr=0.000276
+Step 600/3000: loss=0.0207, obj=0.0103, tgt=0.0104, lr=0.000271
+  Test - Object PSNR: 19.85 dB, Target PSNR: 19.74 dB
+Step 650/3000: loss=0.0211, obj=0.0103, tgt=0.0108, lr=0.000267
+Step 700/3000: loss=0.0211, obj=0.0106, tgt=0.0106, lr=0.000261
+Step 750/3000: loss=0.0209, obj=0.0105, tgt=0.0104, lr=0.000256
+Step 800/3000: loss=0.0208, obj=0.0106, tgt=0.0102, lr=0.000250
+  Test - Object PSNR: 19.85 dB, Target PSNR: 19.74 dB
+Step 850/3000: loss=0.0205, obj=0.0099, tgt=0.0106, lr=0.000244
+Step 900/3000: loss=0.0205, obj=0.0103, tgt=0.0102, lr=0.000238
+Step 950/3000: loss=0.0209, obj=0.0103, tgt=0.0106, lr=0.000232
+Step 1000/3000: loss=0.0202, obj=0.0104, tgt=0.0098, lr=0.000225
+  Test - Object PSNR: 19.85 dB, Target PSNR: 19.74 dB
+Step 1050/3000: loss=0.0211, obj=0.0105, tgt=0.0106, lr=0.000218
+Step 1100/3000: loss=0.0210, obj=0.0102, tgt=0.0108, lr=0.000211
+Step 1150/3000: loss=0.0211, obj=0.0105, tgt=0.0106, lr=0.000204
+Step 1200/3000: loss=0.0210, obj=0.0104, tgt=0.0106, lr=0.000196
+  Test - Object PSNR: 19.85 dB, Target PSNR: 19.74 dB
+Step 1250/3000: loss=0.0204, obj=0.0102, tgt=0.0102, lr=0.000189
+Step 1300/3000: loss=0.0209, obj=0.0101, tgt=0.0108, lr=0.000181
+Step 1350/3000: loss=0.0205, obj=0.0103, tgt=0.0102, lr=0.000173
+Step 1400/3000: loss=0.0207, obj=0.0105, tgt=0.0102, lr=0.000166
+  Test - Object PSNR: 19.85 dB, Target PSNR: 19.74 dB
+Step 1450/3000: loss=0.0207, obj=0.0105, tgt=0.0102, lr=0.000158
+Step 1500/3000: loss=0.0209, obj=0.0105, tgt=0.0104, lr=0.000150
+Step 1550/3000: loss=0.0211, obj=0.0103, tgt=0.0108, lr=0.000142
+Step 1600/3000: loss=0.0204, obj=0.0104, tgt=0.0100, lr=0.000134
+  Test - Object PSNR: 19.85 dB, Target PSNR: 19.74 dB
+Step 1650/3000: loss=0.0207, obj=0.0103, tgt=0.0104, lr=0.000127
+Step 1700/3000: loss=0.0206, obj=0.0102, tgt=0.0104, lr=0.000119
+Step 1750/3000: loss=0.0204, obj=0.0102, tgt=0.0102, lr=0.000111
+Step 1800/3000: loss=0.0214, obj=0.0106, tgt=0.0108, lr=0.000104
+  Test - Object PSNR: 19.85 dB, Target PSNR: 19.74 dB
+Step 1850/3000: loss=0.0207, obj=0.0103, tgt=0.0104, lr=0.000096
+Step 1900/3000: loss=0.0205, obj=0.0103, tgt=0.0102, lr=0.000089
+Step 1950/3000: loss=0.0211, obj=0.0103, tgt=0.0108, lr=0.000082
+Step 2000/3000: loss=0.0209, obj=0.0103, tgt=0.0106, lr=0.000075
+  Test - Object PSNR: 19.85 dB, Target PSNR: 19.74 dB
+Step 2050/3000: loss=0.0211, obj=0.0105, tgt=0.0106, lr=0.000068
+Step 2100/3000: loss=0.0206, obj=0.0102, tgt=0.0104, lr=0.000062
+Step 2150/3000: loss=0.0211, obj=0.0105, tgt=0.0106, lr=0.000056
+Step 2200/3000: loss=0.0206, obj=0.0102, tgt=0.0104, lr=0.000050
+  Test - Object PSNR: 19.85 dB, Target PSNR: 19.74 dB
+Step 2250/3000: loss=0.0211, obj=0.0105, tgt=0.0106, lr=0.000044
+Step 2300/3000: loss=0.0207, obj=0.0103, tgt=0.0104, lr=0.000039
+Step 2350/3000: loss=0.0202, obj=0.0100, tgt=0.0102, lr=0.000033
+Step 2400/3000: loss=0.0212, obj=0.0104, tgt=0.0108, lr=0.000029
+  Test - Object PSNR: 19.85 dB, Target PSNR: 19.74 dB
+Step 2450/3000: loss=0.0213, obj=0.0105, tgt=0.0108, lr=0.000024
+Step 2500/3000: loss=0.0208, obj=0.0104, tgt=0.0104, lr=0.000020
+Step 2550/3000: loss=0.0209, obj=0.0103, tgt=0.0106, lr=0.000016
+Step 2600/3000: loss=0.0211, obj=0.0105, tgt=0.0106, lr=0.000013
+  Test - Object PSNR: 19.85 dB, Target PSNR: 19.74 dB
+Step 2650/3000: loss=0.0209, obj=0.0103, tgt=0.0106, lr=0.000010
+Step 2700/3000: loss=0.0206, obj=0.0101, tgt=0.0106, lr=0.000007
+Step 2750/3000: loss=0.0207, obj=0.0103, tgt=0.0104, lr=0.000005
+Step 2800/3000: loss=0.0202, obj=0.0102, tgt=0.0100, lr=0.000003
+  Test - Object PSNR: 19.85 dB, Target PSNR: 19.74 dB
+Step 2850/3000: loss=0.0208, obj=0.0102, tgt=0.0106, lr=0.000002
+Step 2900/3000: loss=0.0209, obj=0.0104, tgt=0.0106, lr=0.000001
+Step 2950/3000: loss=0.0207, obj=0.0103, tgt=0.0104, lr=0.000000
+Step 3000/3000: loss=0.0214, obj=0.0106, tgt=0.0108, lr=0.000000
+  Test - Object PSNR: 19.85 dB, Target PSNR: 19.74 dB
+
+======================================================================
+Final Evaluation
+======================================================================
+Object PSNR: 19.86 dB
+Target PSNR: 19.77 dB
+Object peak distance: 90.44 pixels
+Target peak distance: 76.38 pixels

@@ -7,5 +7,8 @@ LIBERO/libero/datasets/
 __pycache__/
 *.pth
 *.pt
+*.safetensors
 *.bin
 *.tar.gz
+openvla-oft/runs_rlbench_*/
+openvla-oft/runs_depth_fix/

@@ -59,6 +59,7 @@ class TaskSuite(str, Enum):
     LIBERO_GOAL = "libero_goal"
     LIBERO_10 = "libero_10"
     LIBERO_90 = "libero_90"
+    LIBERO_MIX = "libero_mix"
     LIBERO_PLUS = "libero_plus"
     LIBERO_PRO = "libero_pro"
 
@@ -70,6 +71,7 @@ TASK_MAX_STEPS = {
     TaskSuite.LIBERO_GOAL: 300,  # longest training demo has 270 steps
     TaskSuite.LIBERO_10: 520,  # longest training demo has 505 steps
     TaskSuite.LIBERO_90: 400,  # longest training demo has 373 steps
+    TaskSuite.LIBERO_MIX: 520,
     TaskSuite.LIBERO_PLUS: 520,
     TaskSuite.LIBERO_PRO: 520,
 }
@@ -103,7 +105,8 @@ class GenerateConfig:
     use_film: bool = False                           # If True, uses FiLM to infuse language inputs into visual features
     num_images_in_input: int = 2                     # Number of images in the VLA input (default: 1)
     use_proprio: bool = True                         # Whether to include proprio state in input
-    use_depth: bool = False                          # Whether to include DepthVLA geometry tokens
+    depth_integration_mode: Optional[str] = "depth_object_query"  # rgb_only|depth_prefix_append|depth_action_fusion|depth_action_residual|depth_action_summary_aux|depth_object_query
+    use_depth: bool = True                           # Legacy flag; overridden by depth_integration_mode when set
     depth_grid_size: int = 4                         # Depth token grid size per view
     depth_hidden_dim: int = 256                      # Hidden dimension for depth encoder MLP
     depth_min_m: float = 0.01                        # Minimum valid metric depth
@@ -111,6 +114,13 @@ class GenerateConfig:
     depth_ablation_mode: str = "none"                # none|null|shuffle_tokens for eval-time diagnostics
     geometry_norm: str = "none"                      # none|dataset_std for depth geometry normalization
     geometry_clip: float = 5.0                        # Optional clip range after geometry normalization
+    depth_fusion_mode: str = "object_query"          # legacy: prefix|action_head|action_residual|action_summary_aux|object_query
+    depth_action_fusion_gate_init: float = 0.001      # Used only for action-side fusion module construction
+    depth_fusion_gate_override: Optional[float] = None # Optional eval-time override for loaded action-side depth gate
+    depth_adapter_hidden_dim: int = 256               # Used only for action-residual adapter construction
+    aux_output_dim: int = 7                           # Spatial aux head output dim used when loading depth checkpoints
+    summary_repr: str = "base_xyz"                   # Active v1 action-summary representation
+    summary_pool: str = "meanmax"                    # Reserved for old v2 ablations; ignored by v1
 
     center_crop: bool = True                         # Center crop? (if trained w/ random crop image aug)
     num_open_loop_steps: int = 8                     # Number of actions to execute open-loop before requerying policy
@@ -148,6 +158,79 @@ class GenerateConfig:
     # fmt: on
 
 
+
+
+def normalize_depth_integration_mode(
+    depth_integration_mode: Optional[str], use_depth: bool, depth_fusion_mode: str
+) -> str:
+    if depth_integration_mode is None:
+        if not use_depth:
+            return "rgb_only"
+        if depth_fusion_mode == "prefix":
+            return "depth_prefix_append"
+        if depth_fusion_mode == "action_head":
+            return "depth_action_fusion"
+        if depth_fusion_mode == "action_residual":
+            return "depth_action_residual"
+        if depth_fusion_mode == "action_summary_aux":
+            return "depth_action_summary_aux"
+        if depth_fusion_mode == "object_query":
+            return "depth_object_query"
+        raise ValueError(f"Unknown depth_fusion_mode: {depth_fusion_mode}")
+
+    aliases = {
+        "rgb": "rgb_only",
+        "rgb_only": "rgb_only",
+        "none": "rgb_only",
+        "prefix": "depth_prefix_append",
+        "depth_prefix_append": "depth_prefix_append",
+        "action_head": "depth_action_fusion",
+        "depth_action_fusion": "depth_action_fusion",
+        "action_residual": "depth_action_residual",
+        "residual": "depth_action_residual",
+        "depth_action_residual": "depth_action_residual",
+        "action_summary_aux": "depth_action_summary_aux",
+        "summary_aux": "depth_action_summary_aux",
+        "depth_action_summary_aux": "depth_action_summary_aux",
+        "object_query": "depth_object_query",
+        "depth_object_query": "depth_object_query",
+    }
+    try:
+        return aliases[depth_integration_mode]
+    except KeyError as exc:
+        valid = "rgb_only|depth_prefix_append|depth_action_fusion|depth_action_residual|depth_action_summary_aux|depth_object_query"
+        raise ValueError(f"Unknown depth_integration_mode: {depth_integration_mode}; expected {valid}") from exc
+
+
+def apply_depth_integration_mode(cfg: GenerateConfig) -> str:
+    mode = normalize_depth_integration_mode(cfg.depth_integration_mode, cfg.use_depth, cfg.depth_fusion_mode)
+    cfg.depth_integration_mode = mode
+    cfg.use_depth = mode != "rgb_only"
+    if mode == "depth_action_fusion":
+        cfg.depth_fusion_mode = "action_head"
+    elif mode == "depth_action_residual":
+        cfg.depth_fusion_mode = "action_residual"
+    elif mode == "depth_action_summary_aux":
+        cfg.depth_fusion_mode = "action_summary_aux"
+    elif mode == "depth_object_query":
+        cfg.depth_fusion_mode = "object_query"
+    else:
+        cfg.depth_fusion_mode = "prefix"
+    return mode
+
+
+def apply_v1_summary_config(cfg: GenerateConfig) -> None:
+    """Keep the active experiment line on the v1 action-summary representation."""
+    if cfg.depth_integration_mode != "depth_action_summary_aux":
+        return
+    if cfg.summary_repr != "base_xyz":
+        raise ValueError(
+            "DepthVLA action-summary has been restored to the v1 base_xyz configuration. "
+            "Use --summary_repr base_xyz or omit --summary_repr."
+        )
+    cfg.summary_pool = "meanmax"
+
+
 def validate_config(cfg: GenerateConfig) -> None:
     """Validate configuration parameters."""
     assert cfg.pretrained_checkpoint is not None, "pretrained_checkpoint must not be None!"
@@ -163,6 +246,13 @@ def validate_config(cfg: GenerateConfig) -> None:
 
 def initialize_model(cfg: GenerateConfig):
     """Initialize model and associated components."""
+    depth_integration_mode = apply_depth_integration_mode(cfg)
+    apply_v1_summary_config(cfg)
+    print(f"DepthVLA integration mode: {depth_integration_mode}")
+    print(f"DepthVLA use_depth: {cfg.use_depth}")
+    print(f"DepthVLA depth_fusion_mode: {cfg.depth_fusion_mode}")
+    print(f"DepthVLA appends depth tokens to prefix: {cfg.use_depth and cfg.depth_fusion_mode == 'prefix'}")
+
     # Load model
     model = get_model(cfg)
 

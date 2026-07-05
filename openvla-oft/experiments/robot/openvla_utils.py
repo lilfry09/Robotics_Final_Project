@@ -26,6 +26,7 @@ from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
 from prismatic.models.action_heads import DiffusionActionHead, L1RegressionActionHead
+from prismatic.models.dense_point_depth_encoder import DensePointDepthTokenEncoder
 from prismatic.models.depth_encoder import LightweightDepthTokenEncoder
 from prismatic.models.film_vit_wrapper import FiLMedPrismaticVisionBackbone
 from prismatic.models.projectors import NoisyActionProjector, ProprioProjector
@@ -481,16 +482,34 @@ def get_depth_encoder(cfg: Any, llm_dim: int) -> LightweightDepthTokenEncoder:
     """Load the DepthVLA geometry encoder from a local checkpoint directory."""
     geometry_norm = getattr(cfg, "geometry_norm", "none")
     geometry_clip = getattr(cfg, "geometry_clip", 5.0)
-    depth_encoder = LightweightDepthTokenEncoder(
-        llm_dim=llm_dim,
-        hidden_dim=getattr(cfg, "depth_hidden_dim", 256),
-        grid_size=getattr(cfg, "depth_grid_size", 4),
-        depth_min_m=getattr(cfg, "depth_min_m", 0.01),
-        depth_max_m=getattr(cfg, "depth_max_m", 5.0),
-        num_views=2,
-        geometry_norm=geometry_norm,
-        geometry_clip=geometry_clip,
-    ).to(DEVICE)
+    depth_encoder_type = getattr(cfg, "depth_encoder_type", "grid")
+    if depth_encoder_type == "grid":
+        depth_encoder = LightweightDepthTokenEncoder(
+            llm_dim=llm_dim,
+            hidden_dim=getattr(cfg, "depth_hidden_dim", 256),
+            grid_size=getattr(cfg, "depth_grid_size", 4),
+            depth_min_m=getattr(cfg, "depth_min_m", 0.01),
+            depth_max_m=getattr(cfg, "depth_max_m", 5.0),
+            num_views=2,
+            geometry_norm=geometry_norm,
+            geometry_clip=geometry_clip,
+            enable_summary=getattr(cfg, "depth_fusion_mode", "prefix") == "action_summary_aux",
+            summary_repr=getattr(cfg, "summary_repr", "base_xyz"),
+            summary_pool=getattr(cfg, "summary_pool", "meanmax"),
+        ).to(DEVICE)
+    elif depth_encoder_type == "dense_point":
+        if geometry_norm != "none":
+            raise ValueError("depth_encoder_type='dense_point' requires geometry_norm='none'")
+        depth_encoder = DensePointDepthTokenEncoder(
+            llm_dim=llm_dim,
+            hidden_dim=getattr(cfg, "depth_hidden_dim", 256),
+            num_points_per_view=getattr(cfg, "depth_num_points_per_view", 1024),
+            depth_min_m=getattr(cfg, "depth_min_m", 0.01),
+            depth_max_m=getattr(cfg, "depth_max_m", 5.0),
+            num_views=2,
+        ).to(DEVICE)
+    else:
+        raise ValueError("Unknown depth_encoder_type; choose from grid|dense_point")
     depth_encoder = depth_encoder.to(torch.bfloat16).to(DEVICE)
     depth_encoder.eval()
 
@@ -532,9 +551,42 @@ def get_action_head(cfg: Any, llm_dim: int) -> Union[L1RegressionActionHead, Dif
     """
     assert not (cfg.use_l1_regression and cfg.use_diffusion), "Cannot use both L1 regression and diffusion action head!"
 
+    use_depth_conditioning = (
+        getattr(cfg, "use_depth", False)
+        and getattr(cfg, "depth_fusion_mode", "prefix") in ("action_head", "action_residual", "action_summary_aux", "object_query")
+        and cfg.use_l1_regression
+    )
+    if getattr(cfg, "depth_fusion_mode", "prefix") == "action_residual":
+        depth_fusion_type = "action_residual"
+    elif getattr(cfg, "depth_fusion_mode", "prefix") == "action_summary_aux":
+        depth_fusion_type = "action_summary_aux"
+    elif getattr(cfg, "depth_fusion_mode", "prefix") == "object_query":
+        depth_fusion_type = "object_query"
+    else:
+        depth_fusion_type = "hidden_film"
+
     # Initialize appropriate action head based on configuration
     if cfg.use_l1_regression:
-        action_head = L1RegressionActionHead(input_dim=llm_dim, hidden_dim=llm_dim, action_dim=ACTION_DIM)
+        action_head = L1RegressionActionHead(
+            input_dim=llm_dim,
+            hidden_dim=llm_dim,
+            action_dim=ACTION_DIM,
+            use_depth_conditioning=use_depth_conditioning,
+            depth_fusion_type=depth_fusion_type,
+            depth_fusion_gate_init=getattr(cfg, "depth_action_fusion_gate_init", 0.001),
+            depth_hidden_delta_clip=getattr(cfg, "depth_hidden_delta_clip", 0.0),
+            depth_action_residual_clip=getattr(cfg, "depth_action_residual_clip", 0.0),
+            depth_keypose_residual_weight=getattr(cfg, "depth_keypose_residual_weight", 0.0),
+            depth_keypose_residual_clip=getattr(cfg, "depth_keypose_residual_clip", 0.0),
+            depth_point_action_weight=getattr(cfg, "depth_point_action_weight", 0.0),
+            depth_point_action_clip=getattr(cfg, "depth_point_action_clip", 0.0),
+            depth_waypoint_action_weight=getattr(cfg, "depth_waypoint_action_weight", 0.0),
+            depth_waypoint_action_clip=getattr(cfg, "depth_waypoint_action_clip", 0.0),
+            depth_waypoint_action_scale=getattr(cfg, "depth_waypoint_action_scale", 1.0),
+            depth_waypoint_action_chunk_len=getattr(cfg, "depth_waypoint_action_chunk_len", 1),
+            depth_adapter_hidden_dim=getattr(cfg, "depth_adapter_hidden_dim", 256),
+            spatial_aux_output_dim=getattr(cfg, "aux_output_dim", 3),
+        )
     elif cfg.use_diffusion:
         action_head = DiffusionActionHead(
             input_dim=llm_dim, hidden_dim=llm_dim, action_dim=ACTION_DIM, num_diffusion_steps_train=cfg.num_diffusion_steps_train
@@ -546,6 +598,8 @@ def get_action_head(cfg: Any, llm_dim: int) -> Union[L1RegressionActionHead, Dif
 
     action_head = action_head.to(torch.bfloat16).to(DEVICE)
     action_head.eval()
+    if use_depth_conditioning:
+        print(f"DepthVLA action fusion gate init: {action_head.depth_fusion_gate.detach().float().item():.6g}")
 
     # Find and load checkpoint (may be on Hugging Face Hub or stored locally)
     if model_is_on_hf_hub(cfg.pretrained_checkpoint):
@@ -567,7 +621,20 @@ def get_action_head(cfg: Any, llm_dim: int) -> Union[L1RegressionActionHead, Dif
     else:
         checkpoint_path = find_checkpoint_file(cfg.pretrained_checkpoint, "action_head")
         state_dict = load_component_state_dict(checkpoint_path)
-        action_head.load_state_dict(state_dict)
+        incompatible = action_head.load_state_dict(state_dict, strict=not use_depth_conditioning)
+        if use_depth_conditioning:
+            print(
+                "Loaded action head with strict=False for depth adapter; "
+                f"missing={len(incompatible.missing_keys)}, unexpected={len(incompatible.unexpected_keys)}"
+            )
+
+    if use_depth_conditioning:
+        gate_override = getattr(cfg, "depth_fusion_gate_override", None)
+        if gate_override is not None:
+            with torch.no_grad():
+                action_head.depth_fusion_gate.fill_(float(gate_override))
+            print(f"DepthVLA action fusion gate override: {float(gate_override):.6g}")
+        print(f"DepthVLA action fusion gate current: {action_head.depth_fusion_gate.detach().float().item():.6g}")
 
     return action_head
 
@@ -827,8 +894,9 @@ def get_vla_action(
 
         # Process proprioception data if used
         proprio = None
+        raw_proprio = obs.get("state")
         if cfg.use_proprio:
-            proprio = obs["state"]
+            proprio = raw_proprio
             proprio_norm_stats = vla.norm_stats[cfg.unnorm_key]["proprio"]
             obs["state"] = normalize_proprio(proprio, proprio_norm_stats)
             proprio = obs["state"]
@@ -841,6 +909,8 @@ def get_vla_action(
                 "depth_extrinsics": torch.tensor(obs["depth_extrinsics"], dtype=torch.float32, device=DEVICE).unsqueeze(0),
                 "depth_valid_mask": torch.tensor(obs["depth_valid_mask"], dtype=torch.bool, device=DEVICE).unsqueeze(0),
             }
+            if raw_proprio is not None:
+                depth_kwargs["depth_ee_pos"] = torch.tensor(raw_proprio[:3], dtype=torch.float32, device=DEVICE).unsqueeze(0)
 
         # Generate action
         if action_head is None:
@@ -860,6 +930,7 @@ def get_vla_action(
                 noisy_action_projector=noisy_action_projector,
                 action_head=action_head,
                 depth_encoder=depth_encoder,
+                depth_fusion_mode=getattr(cfg, "depth_fusion_mode", "prefix"),
                 use_film=use_film,
             )
 

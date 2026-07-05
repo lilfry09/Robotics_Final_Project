@@ -1,0 +1,74 @@
+Skipping registering GPU devices...
+
+  0%|          | 0/12 [00:00<?, ?it/s]
+100%|██████████| 12/12 [00:00<00:00, 1685.19it/s]
+
+  0%|          | 0/12 [00:00<?, ?it/s]
+100%|██████████| 12/12 [00:00<00:00, 2034.75it/s]
+
+  0%|          | 0/12 [00:00<?, ?it/s]
+100%|██████████| 12/12 [00:00<00:00, 2277.97it/s]
+
+Using LIBERO constants:
+  NUM_ACTIONS_CHUNK = 8
+  ACTION_DIM = 7
+  PROPRIO_DIM = 8
+  ACTION_PROPRIO_NORMALIZATION_TYPE = bounds_q99
+If needed, manually set the correct constants in `prismatic/vla/constants.py`!
+==========================================================================================
+HEATMAP CAUSALITY TEST
+==========================================================================================
+Checkpoint: runs_quick_heatmap/checkpoint_best.pt
+Data: /root/autodl-tmp/LIBERO/libero/datasets/libero_spatial_plus_rgbd_30tasks_2demos
+Loading data from 12 episodes...
+Total samples: 1426
+
+Evaluating with mode: NORMAL
+======================================================================
+
+NORMAL: Object PSNR = 19.86 dB, Peak dist = 90.04 px
+Loading data from 12 episodes...
+Total samples: 1426
+
+Evaluating with mode: NULL
+======================================================================
+
+NULL: Object PSNR = 19.86 dB, Peak dist = 90.04 px
+Loading data from 12 episodes...
+Total samples: 1426
+
+Evaluating with mode: SHUFFLE
+======================================================================
+
+SHUFFLE: Object PSNR = 19.86 dB, Peak dist = 90.04 px
+
+==========================================================================================
+HEATMAP PREDICTION ABLATION RESULTS
+==========================================================================================
+Mode                Obj PSNR     Tgt PSNR   Obj Peak Dist   Tgt Peak Dist
+------------------------------------------------------------------------------------------
+NORMAL               19.86 dB      19.80 dB        90.04 px        76.07 px
+NULL                 19.86 dB      19.80 dB        90.04 px        76.07 px
+SHUFFLE              19.86 dB      19.80 dB        90.04 px        76.07 px
+==========================================================================================
+
+==========================================================================================
+INTERPRETATION
+==========================================================================================
+
+Object Heatmap:
+  PSNR improvement (normal vs null): +0.00 dB
+  Peak distance improvement: +0.00 pixels
+
+✓ SUCCESS CRITERIA:
+  ✗ Normal PSNR < 25 dB: 19.86 dB
+  ✗ Null PSNR > 15 dB: 19.86 dB
+  ✗ Normal peak distance > 5 pixels: 90.04 px
+  ✗ PSNR separation < 10 dB: 0.00 dB
+
+==========================================================================================
+❌ VALIDATION FAILED: Depth is not being used effectively
+   → Need to debug depth encoder or increase training
+==========================================================================================
+
+✓ Results saved to: /root/autodl-tmp/openvla-oft/experiments/heatmap_ablation/ablation_results.json

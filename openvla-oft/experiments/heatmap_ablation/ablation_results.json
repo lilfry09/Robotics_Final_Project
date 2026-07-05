@@ -1,0 +1,29 @@
+{
+  "normal": {
+    "mode": "normal",
+    "object_psnr": 19.861615770173827,
+    "target_psnr": 19.79743426262135,
+    "object_peak_dist": 284.4226807322582,
+    "target_peak_dist": 287.89519274834146,
+    "object_mse": 0.01033935827780619,
+    "target_mse": 0.010521144226359922
+  },
+  "null": {
+    "mode": "null",
+    "object_psnr": 19.861615770173827,
+    "target_psnr": 19.79743426262135,
+    "object_peak_dist": 284.4226807322582,
+    "target_peak_dist": 287.89519274834146,
+    "object_mse": 0.01033935827780619,
+    "target_mse": 0.010521144226359922
+  },
+  "shuffle": {
+    "mode": "shuffle",
+    "object_psnr": 19.861615770173827,
+    "target_psnr": 19.79743426262135,
+    "object_peak_dist": 284.4226807322582,
+    "target_peak_dist": 287.89519274834146,
+    "object_mse": 0.01033935827780619,
+    "target_mse": 0.010521144226359922
+  }
+}

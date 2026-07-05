@@ -1,0 +1,23 @@
+# 15-Day Quick Config
+experiment_name: quick_depth_fix
+max_steps: 5000
+batch_size: 4
+learning_rate: 5e-5
+
+# Key fixes
+depth_dropout: 0.3  # Start simple, no curriculum
+contrastive_weight: 0.3
+contrastive_margin: 0.05
+
+# Use existing architecture
+depth_integration_mode: depth_action_summary_aux
+depth_grid_size: 4  # Keep original
+depth_hidden_dim: 256  # Keep original
+
+# Freeze RGB
+freeze_vla_lora: true
+freeze_proprio_projector: true
+freeze_action_head_base: true
+
+# Data
+dataset: libero_spatial_rgbd_5tasks_20demos
