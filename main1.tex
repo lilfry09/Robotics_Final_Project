@@ -1,0 +1,371 @@
+\documentclass[conference]{IEEEtran}
+
+\usepackage{times}
+\usepackage[numbers]{natbib}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage[font=footnotesize,labelfont=bf]{caption}
+
+\setlength{\textfloatsep}{5pt plus 1pt minus 2pt}
+\setlength{\floatsep}{5pt plus 1pt minus 2pt}
+\setlength{\intextsep}{5pt plus 1pt minus 2pt}
+\captionsetup{belowskip=0pt,aboveskip=3pt}
+
+\title{DepthVLA-OFT: Diagnosing and Rebuilding RGB-D Action Grounding for VLA Manipulation}
+
+\author{Ruoyu Fu \and Yiran Pang \and Yiqi Liu\\
+Shanghai Jiao Tong University}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This project studies whether explicit metric depth can improve robot manipulation policies built around OpenVLA-OFT. Our proposal began with a simple hypothesis: adding RGB-D geometry tokens to a pretrained vision-language-action model should improve spatial manipulation. The final result is more nuanced and more useful. On clean LIBERO-Spatial, RGB-only OpenVLA-OFT already saturates the trained tasks, achieving $15/15$ successes, so clean success cannot demonstrate depth usage. Multiple OpenVLA-OFT fusion variants on LIBERO and RLBench show that shallow or optional depth branches can be ignored or can perturb a strong RGB policy. However, after moving to a more 3D-sensitive ManiSkill3 PickCube setting and using a primary raw point-cloud action decoder, true point-cloud geometry produces clear closed-loop gains. The same learned policy achieves $20/60$ successes with normal point-cloud input, compared with $1/60$ under eval-time null input and $1/60$ under cross-demo point clouds. Matched no-depth training baselines remain low: sampled-RGB-only reaches $1/60$ and null/proprio reaches $3/60$. We conclude that depth is useful, but only when the benchmark and action representation force geometry to be action-relevant. The main contribution is a complete diagnostic pipeline that turns an initially negative OpenVLA result into a clear design lesson for RGB-D VLA manipulation.
+\end{abstract}
+
+\IEEEpeerreviewmaketitle
+
+\section{Introduction}
+
+Vision-language-action (VLA) models such as OpenVLA and OpenVLA-OFT provide strong semantic and visual priors for language-conditioned robot manipulation~\citep{kim2024openvla,kim2025oft}. However, RGB-only observations must infer 3D structure implicitly from appearance. This is fragile when success depends on contact geometry, gripper-object distance, object height, occlusion, viewpoint change, or precise placement. Our project asks whether explicit metric RGB-D information can help such policies.
+
+The original project goal was to add depth-derived 3D tokens to OpenVLA-OFT with minimal architectural changes. During the semester, the problem changed shape. Clean LIBERO-Spatial turned out to be too easy for the RGB-only baseline: our matched OpenVLA-OFT run solved all $15/15$ clean trained-task episodes. In that setting, a depth branch can be present without being causally used. The central question therefore became:
+\begin{quote}
+\emph{When does a policy actually use depth, rather than merely accepting depth as an unused side input?}
+\end{quote}
+
+We answer this question experimentally. First, we build an RGB-D OpenVLA-OFT pipeline on LIBERO and RLBench, including metric depth back-projection, dense point sampling, matched RGB-only and RGB-D training, rollout evaluation, and normal/null/shuffle/cross-demo depth ablations. These experiments diagnose why lightweight fusion fails: prefix depth disrupts pretrained RGB-language features, while action-side residuals are safer but often optional. Second, we switch to ManiSkill3 PickCube, a higher-throughput and more 3D-sensitive setting with point-cloud observations~\citep{tao2024maniskill3}. There, a primary raw point-cloud policy shows strong closed-loop dependence on true geometry.
+
+Our final claim is deliberately bounded. We do not claim that OpenVLA-OFT RGB-D outperforms RGB-only in closed-loop rollout. We do claim that depth/point-cloud geometry is useful when represented as primary action information on an appropriate 3D-sensitive task. The OpenVLA/RLBench results explain why naive VLA depth fusion is insufficient; the ManiSkill results show a viable path forward.
+
+The project makes three concrete contributions. First, we implement a complete RGB-D OpenVLA-OFT experimental stack, including dataset regeneration, camera geometry handling, depth encoders, training variants, local checkpoint loading, and rollout-time corruption controls. Second, we provide a negative diagnosis of shallow depth fusion: clean benchmark success and low behavior-cloning loss are not enough to prove that a VLA policy uses metric geometry. Third, we construct a geometry-centric ManiSkill3 policy and show a positive causal result under matched controls. The value of the project is therefore not a single leaderboard number, but a design lesson about where depth must enter the policy for manipulation gains to appear.
+
+\section{Related Work}
+
+\textbf{Vision-language-action policies.}
+OpenVLA introduced an open-source VLA model for robot manipulation~\citep{kim2024openvla}. OpenVLA-OFT improves fine-tuning with continuous actions, action chunking, parallel decoding, and regression-style objectives~\citep{kim2025oft}. These features make OpenVLA-OFT an attractive base model for course-scale modification, but its strong RGB-language prior also creates a diagnostic challenge: if RGB and proprioception already solve the training task, a new depth branch may be ignored.
+
+\textbf{3D manipulation policies.}
+Several robot learning systems show that explicit 3D structure can improve manipulation. PerAct predicts actions in a voxelized RGB-D workspace~\citep{shridhar2023peract}; RVT renders point clouds into virtual views~\citep{goyal2023rvt}; Act3D frames 6-DoF action prediction as coarse-to-fine 3D action detection~\citep{gervet2023act3d}; and 3D Diffusion Policy uses sparse point clouds to condition action sequence generation~\citep{ze20243d}. Recent VLA-oriented work also investigates 3D injection or spatial alignment, including PointVLA, SpatialVLA, and BridgeVLA~\citep{li2026pointvla,qu2025spatialvla,li2025bridgevla}. These works motivate our conclusion that depth should be tied to the action representation, not treated as an optional hidden feature.
+
+\textbf{Benchmarks.}
+LIBERO is a useful lifelong robot learning benchmark~\citep{liu2023libero}, but our clean LIBERO results expose a ceiling effect for this project. RLBench provides more geometry-sensitive tasks and has been used by PerAct, RVT, and Act3D~\citep{james2020rlbench}. ManiSkill3 provides GPU-parallelized simulation, visual observations, point clouds, and demonstration replay~\citep{tao2024maniskill3}. We use LIBERO as an engineering sanity check, RLBench as a diagnostic OpenVLA testbed, and ManiSkill3 PickCube as the final positive RGB-D/point-cloud evaluation setting.
+
+\section{Methodology and System Design}
+
+\subsection{Problem Formulation}
+
+Each policy observes language instruction $l$, RGB observation $o_t^{rgb}$, optional depth or point-cloud observation $o_t^{d}$, camera information $(K,T)$ when available, proprioception $p_t$, and predicts either a single low-level action or an action chunk:
+\begin{equation}
+    \pi_\theta(a_{t:t+H-1} \mid o_t^{rgb}, o_t^d, K, T, p_t, l).
+\end{equation}
+The key evaluation question is not only whether the policy succeeds, but whether normal depth improves over corrupted depth and no-depth baselines under matched conditions.
+
+This distinction changes the methodology. A standard comparison between an RGB baseline and an RGB-D variant can be misleading if the task is saturated, because both policies may succeed for the same RGB-driven reason. We therefore treat depth as useful only when three conditions hold: (i) normal geometry improves closed-loop behavior, (ii) corrupting geometry at evaluation time damages the same policy, and (iii) matched policies trained without valid 3D coordinates do not recover the same performance. This is the causal gate used throughout the report.
+
+\subsection{Depth Ablation Protocol}
+
+We use controlled depth modes throughout the project:
+\begin{itemize}
+\item \textbf{Normal}: real metric depth or current point cloud.
+\item \textbf{Null}: depth/point cloud set to zero.
+\item \textbf{Shuffle/cross-demo}: geometry taken from a different sample or episode.
+\item \textbf{RGB-only/no-depth baseline}: trained without valid 3D coordinates.
+\end{itemize}
+Only normal depth outperforming these controls is treated as evidence of causal geometry use.
+
+\begin{table}[t]
+\centering
+\caption{System components implemented during the project.}
+\label{tab:system}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{p{0.25\columnwidth}p{0.67\columnwidth}}
+\toprule
+Component & Role in the final diagnostic pipeline \\
+\midrule
+LIBERO RGB-D regeneration & Replays demonstrations and stores RGB, metric depth, camera intrinsics/extrinsics, proprioception, actions, rewards, and success labels. \\
+OpenVLA-OFT depth fusion & Tests prefix, residual, action-head, heatmap, point-selection, and waypoint-style geometry injection. \\
+Depth corruption controls & Provides null, shuffle, and cross-sample depth inputs at train or evaluation time. \\
+RLBench probes & Tests whether depth reaches a 3D bottleneck on a contact-sensitive task even when rollout success is not obtained. \\
+ManiSkill3 point-cloud policy & Uses raw cropped point clouds as primary action information for the final positive PickCube result. \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\subsection{OpenVLA-OFT RGB-D Pipeline}
+
+For LIBERO and RLBench, we implemented RGB-D data conversion, metric back-projection, dense point sampling, and OpenVLA-OFT-compatible training. The depth branch was tested in several forms:
+
+\textbf{Prefix append.}
+Depth-derived geometry tokens are appended to the VLA prefix. This tests the most direct version of our proposal, but it changes the token distribution seen by the pretrained VLM.
+
+\textbf{Action-side fusion.}
+Depth features bypass the VLM prefix and condition the continuous action head through a gated residual or FiLM-like module. This protects the RGB-language backbone but makes depth easier to ignore.
+
+\textbf{Waypoint/action coupling.}
+For RLBench, we moved from a passive residual to explicit 3D waypoint supervision. The strongest OpenVLA diagnostic used a target named \texttt{visible\_pre\_first\_close\_point\_xyz}: from the current point cloud, the model selects the visible 3D point closest to the demonstration pre-contact pose. This selected point is written into an 8-step waypoint/action chunk.
+
+The OpenVLA-OFT path was intentionally conservative. We kept the pretrained RGB-language policy as intact as possible and added only lightweight geometry modules, because the original proposal targeted course-scale modification rather than full VLA pretraining. This made the experiment realistic, but it also exposed the central failure mode: if the new branch is optional, the optimizer can minimize imitation loss without using it. The later RLBench probes therefore moved depth closer to the action representation by predicting or selecting explicit 3D targets.
+
+For metric geometry, depth pixels are back-projected using camera intrinsics and transformed into the robot frame using extrinsics. We tested both compact pooled summaries and denser point sets. The summary variants are cheap and stable, but can lose local contact information. Dense point variants preserve more geometry, but are harder to align with a pretrained 2D image-language backbone. This tradeoff motivated the final ManiSkill3 design, where the point cloud is no longer a small side branch.
+
+\subsection{ManiSkill3 Point-Cloud Policy}
+
+Because OpenVLA-OFT lightweight fusion repeatedly failed to produce closed-loop depth gains, we built a smaller but more geometry-aligned ManiSkill3 policy. We replayed or generated PickCube trajectories with point-cloud observations and \texttt{pd\_ee\_delta\_pos} actions. The final model is a PointNet-style teacher-distilled policy:
+\begin{equation}
+    \{x_i,y_i,z_i,r_i,g_i,b_i\}_{i=1}^{N}
+    \rightarrow h_{pc},
+\end{equation}
+where sampled cropped point-cloud features are processed by an MLP and max pooling. The pooled point-cloud feature is concatenated with task/proprioceptive features and passed through heads for phase prediction, cube-center prediction, and low-level action prediction. The policy is trained on $100$ successful geometry-teacher PickCube trajectories, containing $8388$ transitions, for $10000$ steps with hidden dimension $256$.
+
+This policy is not OpenVLA. It is included because it directly tests the core project question: can metric geometry be learned and used for closed-loop manipulation when the benchmark and action representation are 3D-sensitive?
+
+The point cloud is cropped to remove much of the table/background and emphasize task-relevant 3D structure. During training, cube-center and phase labels from the geometry teacher are used as auxiliary supervision, but at evaluation the learned policy receives only the cropped point cloud and task/proprioceptive state. This is important: the final positive result is not obtained by feeding the ground-truth cube pose at test time. Instead, the policy must infer useful object geometry from the point cloud. The auxiliary heads act as representation shaping, while the closed-loop action head determines success.
+
+The training objective combines action imitation with auxiliary geometric losses:
+\begin{equation}
+    \mathcal L =
+    \mathcal L_{action}
+    + \lambda_c \mathcal L_{cube}
+    + \lambda_p \mathcal L_{phase}.
+\end{equation}
+The auxiliary terms are not used to claim success by themselves. They are included to make the learned representation sensitive to object location and manipulation phase, and the final evidence is still measured by closed-loop rollouts under normal and corrupted point-cloud inputs.
+
+\subsection{Implementation Details}
+
+The implementation spans three code paths. The LIBERO path focuses on data integrity: replay demonstrations, save synchronized RGB-D observations, store camera parameters, and verify that local evaluation can load fine-tuned checkpoints without relying on remote model state. The RLBench path focuses on geometry-action diagnostics: convert demonstrations to HDF5, inspect depth-derived keypose targets, evaluate corrupted-depth rollouts, and analyze whether predicted action chunks change when depth is changed. The ManiSkill3 path focuses on high-throughput point-cloud policy learning: collect geometry-teacher rollouts, train compact point-cloud decoders, and evaluate closed-loop success under controlled point-cloud corruptions.
+
+For OpenVLA-OFT, we modified the training stack to pass depth-related tensors through the dataset, collator, model wrapper, and action head. This required adding depth-mode flags, dataset statistics handling for local checkpoints, and rollout-time controls that preserve RGB and proprioception while changing only the depth pathway. For RLBench, we added scripts for environment checks, demonstration replay, HDF5 conversion, dense depth probing, projected heatmap probing, and policy-action diagnostics. For ManiSkill3, we kept a separate environment setup to avoid disturbing the OpenVLA/LIBERO stack, and implemented standalone collection, training, and evaluation scripts for point-cloud policies.
+
+\begin{table}[t]
+\centering
+\caption{Main model variants tested.}
+\label{tab:variants}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{p{0.27\columnwidth}p{0.30\columnwidth}p{0.31\columnwidth}}
+\toprule
+Variant & Geometry entry point & Main lesson \\
+\midrule
+Prefix depth tokens & VLA prefix sequence & Direct injection can perturb pretrained RGB-language features. \\
+Action residual & Continuous action head & Safer than prefix fusion but easy for policy to ignore. \\
+Heatmap/keypose probes & Projected 2D/3D target pathway & Depth signal exists, but signal alone is not rollout success. \\
+Waypoint point selection & 8-step action chunk & Geometry enters action chunk but still lacks temporal/contact control. \\
+ManiSkill point-cloud policy & Primary learned action decoder & Produces final closed-loop geometry-dependent success gain. \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\subsection{Evaluation Metrics}
+
+The main metric is closed-loop task success, because manipulation policies can have low offline action error while still failing at contact timing or compounding rollout errors. We also report intermediate diagnostic metrics when full success is absent. For RLBench, these include projected keypose peak error, selected 3D point distance to a pre-contact label, action RMSE, and direction cosine between predicted and target action deltas. These metrics are not substitutes for rollout success; they are used to locate where the depth signal enters or disappears. For ManiSkill3, the final comparison uses only closed-loop success under matched episode budgets, because the point-cloud policy is simple enough that rollout success directly reflects whether the learned decoder can use geometry.
+
+\section{Experiments and Evaluation}
+
+Table~\ref{tab:exp-matrix} summarizes the experimental matrix. The evaluation progresses from a saturated benchmark, to a more geometric OpenVLA diagnostic, to a task where point-cloud geometry is central to control.
+
+\begin{table}[t]
+\centering
+\caption{Experimental matrix. Each stage answers a different question.}
+\label{tab:exp-matrix}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{p{0.20\columnwidth}p{0.23\columnwidth}p{0.43\columnwidth}}
+\toprule
+Stage & Environment & Purpose \\
+\midrule
+LIBERO & Clean trained LIBERO-Spatial tasks & Verify RGB-D data/training/evaluation and test whether clean success can show depth usage. \\
+RLBench & \texttt{open\_drawer} & Test depth-action coupling on a contact-sensitive manipulation task. \\
+ManiSkill3 & PickCube & Final causal test with raw point clouds entering the primary learned action decoder. \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\subsection{LIBERO Clean Evaluation}
+
+The first experiments used regenerated RGB-D LIBERO-Spatial demonstrations. We trained matched RGB-only and depth variants and evaluated on the five trained task IDs. The RGB-only baseline achieved $15/15$ successes, revealing that clean LIBERO was not a useful final test for depth value. Table~\ref{tab:libero} summarizes the main diagnostic results.
+
+\begin{table}[t]
+\centering
+\caption{LIBERO-Spatial clean evaluation on five trained tasks, three trials per task.}
+\label{tab:libero}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcc}
+\toprule
+Model / ablation & Successes & Interpretation \\
+\midrule
+RGB-only OpenVLA-OFT & $15/15$ & Clean task is saturated. \\
+Prefix depth & $10/15$ & Extra depth tokens perturb the policy. \\
+Prefix null depth & $11/15$ & Token-format change already matters. \\
+Prefix shuffled depth & $13/15$ & True geometry not clearly used. \\
+Action residual normal/null/shuffle & $13/15$ / $13/15$ / $13/15$ & Safe but not depth-causal. \\
+Distance-bin aux normal/null/shuffle & $14/15$ / $14/15$ / $15/15$ & Stable but still no depth-use proof. \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+These results changed the project direction. The prefix-depth models sometimes solved the task, but their behavior did not track whether the depth was real. In several cases, null or shuffled depth matched or exceeded normal depth. That pattern rules out a strong depth-use claim. It also shows why clean success alone is not a sufficient metric for this project: a high success rate can be produced by RGB-language priors and memorized task structure rather than metric 3D reasoning.
+
+The LIBERO experiments were still valuable engineering milestones. They validated the RGB-D regeneration code, camera calibration fields, local LoRA checkpoint loading, dataset statistics handling, rollout evaluation, and depth-ablation infrastructure. Without those checks, later negative results could have been dismissed as software failure rather than model behavior.
+
+\subsection{RLBench OpenVLA Diagnostics}
+
+We then moved to RLBench \texttt{open\_drawer}, which is more contact- and geometry-sensitive. We verified that expert trajectories are executable by replaying stored demonstrations successfully. We also found that projected keypose heatmaps contain clear depth signal: on \texttt{open\_drawer}, normal depth gives $2.85$ px peak error, cross-sample depth gives $8.86$ px, and null depth gives $43.30$ px.
+
+However, multiple OpenVLA-OFT recipes still failed to produce task success: safe residual fusion, keypose residuals, projected heatmap residuals, point-action residuals, primary waypoint action, and long-horizon auxiliary targets. The final OpenVLA diagnostic was not a rollout success, but it did show that depth entered the geometric action path. With \texttt{visible\_pre\_first\_close\_point\_xyz}, the selected point under normal depth is closer to the current visible pre-contact label than corrupted controls (Table~\ref{tab:rlbench}). The selected point also changes the 8-step waypoint/action chunk. The remaining failure is converting this geometric point into reliable contact pose, gripper orientation, and post-contact temporal motion.
+
+\begin{table}[t]
+\centering
+\caption{RLBench \texttt{open\_drawer} visible pre-contact diagnostic. Lower selected-point error is better.}
+\label{tab:rlbench}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccc}
+\toprule
+Depth mode & Point-to-label L2 & xyz RMSE & Direction cosine \\
+\midrule
+Normal & $0.099$ m & $0.00395$ & $0.561$ \\
+Null & $0.699$ m & $0.00491$ & $0.251$ \\
+Cross-sample & $0.194$ m & $0.00364$ & $0.722$ \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+The RLBench result is an intermediate result rather than a final success. It demonstrates that metric geometry can influence a selected 3D bottleneck, but the OpenVLA-OFT action pathway still lacks enough structure to turn that bottleneck into a robust manipulation policy. Opening a drawer requires a sequence of coupled decisions: approach the handle, align the gripper, make contact, close the fingers at the right time, and pull along the drawer axis. A single visible pre-contact point does not solve all of those decisions. This is why the final positive experiment uses a smaller policy whose entire action decoder is built around point-cloud geometry.
+
+\subsection{ManiSkill3 PickCube Evaluation}
+
+The final evaluation uses ManiSkill3 PickCube. We evaluate the same learned raw point-cloud policy under normal, null, and cross-demo point-cloud inputs. We also train matched no-depth baselines on the same teacher data, model size, and training budget:
+\begin{itemize}
+\item \textbf{Sampled-RGB-only}: sampled points keep RGB but xyz is zeroed.
+\item \textbf{Null/proprio}: point input is zeroed; only task/proprio features remain.
+\end{itemize}
+
+For the learned point-cloud policy, we ran two 30-episode evaluation seeds for normal/null/cross-demo, giving 60 episodes per eval-time input mode. The two train-time no-depth baselines use the same 60-episode final evaluation budget.
+
+The final comparison controls for two possible confounds. Eval-time null and cross-demo tests ask whether the same trained policy still works when its geometry is removed or made inconsistent with the current scene. Matched train-time no-depth baselines ask whether the policy could have learned the same behavior from non-geometric state or RGB-like appearance alone. A positive result must beat both forms of control.
+
+The teacher trajectories are generated from a geometry-aware controller and then filtered to keep successful demonstrations. This gives the learned policy meaningful supervision while keeping the evaluation closed-loop. We use $100$ successful teacher trajectories and $8388$ transitions for the final raw point-cloud policy. The network is intentionally small: a per-point MLP, max pooling, a fused state/point-cloud trunk, and separate heads for action and auxiliary prediction. This makes the result easier to interpret than a large black-box model. If success drops from normal point clouds to null or cross-demo point clouds, the change is attributable to the missing or inconsistent 3D observation rather than to model scale.
+
+\section{Results and Discussion}
+
+\subsection{Main Quantitative Result}
+
+Table~\ref{tab:main} shows the final result. Normal point-cloud input strongly outperforms both eval-time corrupted inputs and matched no-depth training baselines. The normal policy reaches $20/60$ successes, while the same checkpoint with null or cross-demo geometry reaches only $1/60$ each.
+
+\begin{table}[t]
+\centering
+\caption{Final ManiSkill3 PickCube results. The normal policy uses raw cropped point clouds.}
+\label{tab:main}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcc}
+\toprule
+Setting & Success & Interpretation \\
+\midrule
+Raw point-cloud policy, normal input & $20/60$ & True 3D geometry used. \\
+Same policy, eval-time null input & $1/60$ & Geometry removed at test time. \\
+Same policy, eval-time cross-demo input & $1/60$ & Wrong geometry breaks policy. \\
+Matched sampled-RGB-only train baseline & $1/60$ & No valid xyz information. \\
+Matched null/proprio train baseline & $3/60$ & Mostly state-only behavior. \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+This is the strongest positive result of the project. It shows that depth/point-cloud geometry is not useless: when the task and decoder require 3D information, true geometry produces closed-loop gains over no-depth and wrong-geometry controls.
+
+The magnitude of the gap is the important result. Normal point clouds obtain more than an order of magnitude higher success than the corrupted eval-time controls. The sampled-RGB-only baseline also stays near zero, showing that color samples without valid xyz coordinates are not enough in this setup. The null/proprio baseline achieves $3/60$, slightly above the other no-depth controls, but still far below normal point clouds. This indicates that proprioceptive state and phase regularities provide weak priors, while current 3D object geometry supplies the information needed for reliable pick behavior.
+
+We also ran a secondary diagnostic in which a learned cube predictor was connected to a fixed geometry controller. This setting is less end-to-end than the learned action policy, but it helps isolate whether the point cloud contains enough information to support the task. With normal point clouds, the learned cube-plus-controller variant achieved $22/30$ successes; with null and cross-demo point clouds, it achieved $1/30$ and $0/30$. This supports the same conclusion as the main policy result: the useful signal comes from the current scene geometry, not from phase alone or from a constant controller prior.
+
+\begin{table}[t]
+\centering
+\caption{Secondary ManiSkill3 geometry diagnostic.}
+\label{tab:secondary}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcc}
+\toprule
+Setting & Success & Interpretation \\
+\midrule
+Learned cube + fixed controller, normal & $22/30$ & Point cloud supports object localization. \\
+Learned cube + fixed controller, null & $1/30$ & Removing geometry breaks localization. \\
+Learned cube + fixed controller, cross-demo & $0/30$ & Wrong geometry is actively harmful. \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\subsection{Why OpenVLA-OFT Did Not Show the Same Gain}
+
+The OpenVLA-OFT experiments reveal two failure modes. First, prefix depth changes the distribution of tokens entering a pretrained RGB-language model, often hurting a policy that already works well. Second, action-side depth is safer but optional. Under behavior cloning, if RGB/proprioception/language can reduce the action loss, the model has little pressure to use depth. Even when a selected 3D point is injected into the action chunk, RLBench \texttt{open\_drawer} requires more than a point: it needs stable pre-contact approach, gripper pose, contact timing, and drawer-pulling trajectory.
+
+This also explains why the ManiSkill3 result should not be interpreted as contradicting the OpenVLA-OFT result. The two systems answer different questions. OpenVLA-OFT tests whether a large pretrained RGB-language policy will automatically exploit a lightweight depth side channel. ManiSkill3 tests whether a learned action decoder can use point-cloud geometry when that geometry is the primary observation. The answer to the first question is negative in our experiments; the answer to the second is positive.
+
+This distinction matters. The project should not be summarized as ``depth failed.'' A more accurate summary is:
+\begin{quote}
+\emph{Depth failed as a shallow optional OpenVLA adapter on saturated or difficult contact tasks, but succeeded as primary point-cloud information in a 3D-sensitive PickCube policy.}
+\end{quote}
+
+\subsection{Implementation Lessons}
+
+Several practical lessons emerged. First, RGB-D robotics experiments need explicit corruption controls. Otherwise, a model that ignores depth and a model that uses depth can look identical on clean tasks. Second, benchmark choice matters as much as representation choice. LIBERO was useful for software validation, but its clean trained-task setting was too saturated to measure depth gain. Third, the action decoder must have a reason to use geometry. A residual adapter can preserve an RGB baseline, but that same safety makes it easy for depth to remain unused. Finally, temporal structure remains a bottleneck. Even in PickCube, the learned point-cloud policy succeeds clearly more often than the controls but is far from solved, suggesting that better action sequence modeling is the next step.
+
+\subsection{Reproducibility}
+
+The submitted repository is organized around the three experimental tracks. The LIBERO directory contains the benchmark dependency used for regeneration and clean evaluation. The OpenVLA-OFT directory contains the modified depth-fusion training code, depth encoders, action-head variants, RLBench utilities, ManiSkill3 point-cloud policies, and result-collection helpers. Generated datasets, checkpoints, virtual environments, and large simulator outputs are intentionally excluded from git; the repository keeps the source code, configuration examples, diagnostic scripts, summarized results, and final report.
+
+The most relevant entry points are \texttt{finetune\_depthvla.py} for OpenVLA-OFT depth training, \texttt{depth\_signal\_probe.py} for depth-action diagnostics, the \texttt{experiments/robot/rlbench} utilities for RLBench conversion/evaluation, and the \texttt{experiments/robot/maniskill} scripts for PickCube point-cloud collection, training, and rollout evaluation. This layout reflects the final project narrative: the OpenVLA code supports the negative diagnostic claim, while the ManiSkill3 code supports the positive point-cloud result.
+
+\subsection{Limitations}
+
+The final positive result is not an end-to-end OpenVLA result. It is a teacher-distilled ManiSkill3 point-cloud policy, trained from a geometry teacher. This limits claims about language-conditioned generalization. The policy is also task-specific to PickCube and still has moderate success rate ($20/60$), so there is substantial room for temporal modeling improvements. Finally, the result demonstrates geometry usage on one 3D-sensitive task rather than broad multi-task generalization.
+
+\subsection{Future Improvements}
+
+The next technical step is not to add another shallow residual to OpenVLA-OFT. Instead, future work should combine VLA semantic priors with a primary 3D action decoder, such as DP3-style point-cloud action sequences, Act3D/PerAct-style 3D action maps, or BridgeVLA-style input-output spatial alignment. For RLBench, the target should be object/contact-conditioned rather than a generic waypoint. For ManiSkill, the natural extension is a temporal action decoder or diffusion policy trained on larger point-cloud demonstration sets.
+
+\section{Conclusion}
+
+This project began as an attempt to add depth tokens to OpenVLA-OFT and ended as a broader diagnosis of RGB-D action grounding. We built a complete RGB-D training and evaluation pipeline, identified LIBERO clean-task saturation, tested multiple OpenVLA-OFT fusion mechanisms, and used normal/null/shuffle/cross-demo ablations to avoid false claims. The OpenVLA/RLBench experiments show that lightweight depth fusion can expose geometric signal but still fail to produce closed-loop contact manipulation. The final ManiSkill3 PickCube experiments show the positive side: with a more 3D-sensitive benchmark and a primary raw point-cloud action decoder, true geometry improves closed-loop success from near-zero corrupted/no-depth controls to $20/60$. Our final answer is therefore yes: the project succeeds in demonstrating useful depth information, while also showing why naive VLA depth fusion is not enough.
+
+\begin{thebibliography}{99}
+
+\bibitem{kim2024openvla}
+M. J. Kim, K. Pertsch, S. Karamcheti, T. Xiao, A. Balakrishna, S. Nair, R. Rafailov, E. Foster, G. Lam, P. Sanketi, et al., ``OpenVLA: An open-source vision-language-action model,'' arXiv preprint arXiv:2406.09246, 2024.
+
+\bibitem{kim2025oft}
+M. J. Kim, C. Finn, and P. Liang, ``Fine-tuning vision-language-action models: Optimizing speed and success,'' arXiv preprint arXiv:2502.19645, 2025.
+
+\bibitem{shridhar2023peract}
+M. Shridhar, L. Manuelli, and D. Fox, ``Perceiver-Actor: A multi-task transformer for robotic manipulation,'' in \emph{Conference on Robot Learning}, 2023.
+
+\bibitem{goyal2023rvt}
+A. Goyal, J. Xu, Y. Guo, V. Blukis, Y.-W. Chao, and D. Fox, ``RVT: Robotic View Transformer for 3D object manipulation,'' in \emph{Conference on Robot Learning}, 2023.
+
+\bibitem{gervet2023act3d}
+T. Gervet, S. Chintala, D. Batra, J. Malik, and D. S. Chaplot, ``Act3D: 3D feature field transformers for multi-task robotic manipulation,'' in \emph{Conference on Robot Learning}, 2023.
+
+\bibitem{ze20243d}
+Y. Ze, G. Zhang, K. Zhang, C. Hu, M. Wang, and H. Xu, ``3D Diffusion Policy: Generalizable visuomotor policy learning via simple 3D representations,'' arXiv preprint arXiv:2403.03954, 2024.
+
+\bibitem{li2026pointvla}
+C. Li, J. Wen, Y. Peng, Y. Peng, and Y. Zhu, ``PointVLA: Injecting the 3D world into vision-language-action models,'' \emph{IEEE Robotics and Automation Letters}, 2026.
+
+\bibitem{qu2025spatialvla}
+D. Qu, H. Song, Q. Chen, Y. Yao, X. Ye, Y. Ding, Z. Wang, J. Gu, B. Zhao, D. Wang, et al., ``SpatialVLA: Exploring spatial representations for visual-language-action model,'' arXiv preprint arXiv:2501.15830, 2025.
+
+\bibitem{li2025bridgevla}
+P. Li, Y. Chen, H. Wu, X. Ma, X. Wu, Y. Huang, L. Wang, T. Kong, and T. Tan, ``BridgeVLA: Input-output alignment for efficient 3D manipulation learning with vision-language models,'' arXiv preprint arXiv:2506.07961, 2025.
+
+\bibitem{liu2023libero}
+B. Liu, Y. Zhu, C. Gao, Y. Feng, Q. Liu, Y. Zhu, and P. Stone, ``LIBERO: Benchmarking knowledge transfer for lifelong robot learning,'' in \emph{Advances in Neural Information Processing Systems}, 2023.
+
+\bibitem{james2020rlbench}
+S. James, Z. Ma, D. R. Arrojo, and A. J. Davison, ``RLBench: The robot learning benchmark and learning environment,'' \emph{IEEE Robotics and Automation Letters}, 5(2):3019--3026, 2020.
+
+\bibitem{tao2024maniskill3}
+S. Tao, F. Xiang, A. Shukla, Y. Qin, X. Hinrichsen, X. Yuan, C. Bao, X. Lin, Y. Liu, T. Chan, Y. Gao, X. Li, T. Mu, N. Xiao, A. Gurha, Z. Huang, R. Calandra, R. Chen, S. Luo, and H. Su, ``ManiSkill3: GPU parallelized robotics simulation and rendering for generalizable embodied AI,'' arXiv preprint arXiv:2410.00425, 2024.
+
+\end{thebibliography}
+
+\end{document}
